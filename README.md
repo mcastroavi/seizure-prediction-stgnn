@@ -10,26 +10,19 @@
 [![Stevens](https://img.shields.io/badge/Stevens-AAI%20Program-8C1515)]()
 
 ---
+## 0. Motivation
+
+To anticipate and predict seizures minutes before patients lose self control.
 
 ## 1. Project Overview
 
-Epileptic seizures affect over 50 million people worldwide. For patients
-with drug-refractory epilepsy, unpredictability is the primary stressor —
-not the seizure itself, but not knowing when it will happen.
-
 This project proposes a **Synchrony-Driven Spatio-Temporal Graph Neural
 Network (ST-GNN)** that predicts seizures by tracking the gradual buildup
-of inter-electrode synchrony in the brain's EEG signal before onset.
-
-**The core problem with existing systems:**
-Binary classifiers treat every preictal window identically — a window
-28 minutes before onset gets the same label as one 30 seconds before.
-This ignores the continuous biological reality of seizure progression.
+of inter-electrode synchrony in the brain's EEG signal before onset. 
 
 **What this model does differently:**
-Instead of a binary alarm, it outputs a **continuous risk score** from
-0 to 1 that rises progressively as the brain approaches seizure onset —
-functioning as a *weather report for the brain*, not just an alarm.
+The framework outputs a **continuous risk score** from
+0 to 1 that rises progressively as the brain approaches seizure onset.
 
 **Key Results on CHB-MIT (24 subjects, cross-subject):**
 
@@ -48,18 +41,16 @@ functioning as a *weather report for the brain*, not just an alarm.
 
 - **Dynamic PLV Graph Construction** — converts each 5-second EEG window
   into a Phase Locking Value connectivity graph capturing inter-electrode
-  synchrony
+  synchrony.
 - **Dual-Branch Architecture** — GATv2 spatial branch + TCN temporal
-  branch running in parallel and fused into a single risk score
+  branch running in parallel and fused into a single risk score.
 - **Soft-Label Supervision** — continuous risk trajectory replaces binary
   labels, enabling the model to learn physiologically meaningful risk
-  progression
+  progression.
 - **Lead-Time Analysis** — first framework to report per-subject early
-  warning lead times on CHB-MIT (mean 17.4 minutes)
-- **Compact Model** — 295,250 parameters, ~1.2 MB, suitable for IoMT
-  wearable deployment
+  warning lead times on CHB-MIT (mean 17.4 minutes).
 - **Cross-Subject Evaluation** — one model trained and evaluated across
-  all 24 subjects without patient-specific fine-tuning
+  all 24 subjects without patient-specific fine-tuning.
 
 ---
 
@@ -460,12 +451,12 @@ and sell copies of the Software.
              Spatio-Temporal Graph Neural Networks},
   journal = {Stevens Institute of Technology,
              M.S. Applied Artificial Intelligence},
-  year    = {2025},
+  year    = {2026},
   note    = {CHB-MIT, ROC-AUC=0.883, Lead Time=17.4 min}
 }
 ```
 
 ---
 
-*Mauricio Castro Aviles — Stevens Institute of Technology, May 2025*
+*Mauricio Castro Aviles — Stevens Institute of Technology, May 2026*
 *M.S. Applied Artificial Intelligence*

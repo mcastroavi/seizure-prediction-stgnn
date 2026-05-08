@@ -431,14 +431,9 @@ torch.backends.cudnn.benchmark     = False
 
 ---
 
-## 17. License
+## License
+This project is licensed under the MIT License — see the LICENSE file for details.
 
-MIT License — Copyright (c) 2025 Mauricio Castro Aviles
-
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software to deal in the Software without restriction,
-including the rights to use, copy, modify, merge, publish, distribute,
-and sell copies of the Software.
 
 ---
 

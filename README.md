@@ -185,31 +185,14 @@ seizure-prediction-stgnn/
 ├── README.md
 ├── requirements.txt
 ├── LICENSE
-│
-├── src/
-│   ├── model.py          ← STGNN_Soft architecture
-│   ├── dataset.py        ← CHBMIT_SoftDataset
-│   ├── loss.py           ← SoftSeizureLoss
-│   ├── preprocess.py     ← segmentation + PLV
-│   ├── build_h5.py       ← HDF5 builder with soft labels
-│   ├── train.py          ← training loop
-│   ├── evaluate.py       ← test evaluation + metrics
-│   └── utils.py          ← PLV, graph construction helpers
+├── .gitignore
 │
 ├── checkpoints/
-│   └── best_chbmit_soft.pt   ← trained weights (best val AUC)
+│   ├── best_chbmit_soft.pt      ← best soft-label weights (epoch 56)
+│   └── history_soft.pt          ← training history (loss, AUC, F1)
 │
-├── figures/
-│   ├── per_subject_auc.png
-│   ├── lead_time_per_subject.png
-│   ├── preictal_vs_leadtime.png
-│   └── dataset_statistics.png
-│
-└── notebooks/
-    ├── 01_preprocessing.ipynb
-    ├── 02_training.ipynb
-    └── 03_evaluation.ipynb
-```
+├── chbmit_stgnn_v2.ipynb        ← final model (training + evaluation)
+└── chbmit_stgnn_v1_baseline_binary_predictor.ipynb  ← hard-label baseline
 
 ---
 

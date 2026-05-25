@@ -359,14 +359,15 @@ else:
 ```
 
 ---
-
 ## 13. Model Files
 
 | File | Description |
 |------|-------------|
-| `checkpoints/best_chbmit_soft.pt` | Best weights (val AUC=0.8881, epoch 56) |
-| `src/model.py` | STGNN_Soft class definition |
-| `src/loss.py` | SoftSeizureLoss — MSE + BCE |
+| `checkpoints/best_chbmit_soft.pt` | Best soft-label weights (val AUC=0.8881, epoch 56) |
+| `checkpoints/history_soft.pt` | Training history — loss, AUC, F1 per epoch |
+| `chbmit_stgnn_v2.ipynb` | Final model — training, evaluation, all figures |
+| `chbmit_stgnn_v1_baseline_binary_predictor.ipynb` | Hard-label baseline for comparison |
+
 
 ```python
 ckpt = torch.load('best_chbmit_soft.pt')

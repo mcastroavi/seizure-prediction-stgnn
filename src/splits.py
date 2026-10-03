@@ -54,17 +54,24 @@ def _block_end(block: np.ndarray, b: int) -> int:
     return int(np.where(block == b)[0].max())
 
 
-def chronological_split(block: np.ndarray, test_frac: float = 1 / 3,
+def chronological_split(block: np.ndarray, fractions=(0.5, 0.2, 0.3),
                         gap: int = 12) -> dict[str, np.ndarray] | None:
-    """Split one subject's windows forward in time by seizure.
+    """Split one subject's windows forward in time: train → validation → test.
+
+    Cuts are placed anywhere outside a preictal period (so no seizure's preictal period is
+    split), as close as possible to the requested fractions of *recording time*, with at
+    least one seizure in each part. Splitting by time rather than by
+    seizure count matters: validation needs hours of interictal data, or the threshold chosen
+    on it is meaningless (a seizure-count split once gave a validation set with ~10 minutes
+    of interictal data).
 
     Parameters
     ----------
     block : per-window seizure-block id (-1 for interictal), windows in recording order.
-    test_frac : fraction of seizures (rounded, at least one) reserved for testing.
+    fractions : target (train, val, test) shares of the windows.
     gap : windows dropped right after each cut so neighbouring windows never straddle it.
 
-    Returns ``None`` when the subject has fewer than 3 seizures (need >=1 train, 1 val, 1 test).
+    Returns ``None`` when the subject has fewer than 3 seizures.
     """
     block = np.asarray(block)
     ids = [int(b) for b in np.unique(block[block >= 0])]
@@ -72,14 +79,27 @@ def chronological_split(block: np.ndarray, test_frac: float = 1 / 3,
     n = len(ids)
     if n < 3:
         return None
-    n_test = max(1, int(round(n * test_frac)))
-    n_train = n - n_test - 1
-    if n_train < 1:
-        n_test, n_train = n - 2, 1
+    N = len(block)
+    ends = np.array(sorted(_block_end(block, b) + 1 for b in ids))   # first index after each block
+    pos = np.arange(1, N)
+    valid = ~((block[pos - 1] >= 0) & (block[pos - 1] == block[pos]))  # not inside a block
+    if gap > 0:                       # the dropped gap after a cut must not eat into a preictal block
+        pre = np.concatenate([[0], np.cumsum(block >= 0)])
+        valid &= (pre[np.minimum(pos + gap, N)] - pre[pos]) == 0
+    cand = pos[valid]
+    before = np.searchsorted(ends, cand, side="right")                # seizures fully before cut
 
-    cut_val = _block_end(block, ids[n_train - 1]) + 1
-    cut_test = _block_end(block, ids[n_train]) + 1
-    idx = np.arange(len(block))
+    t_val, t_test = fractions[0] * N, (fractions[0] + fractions[1]) * N
+    ok = (before >= 1) & (before <= n - 2)
+    if not ok.any():
+        return None
+    cut_val = int(cand[ok][np.argmin(np.abs(cand[ok] - t_val))])
+    k_val = int(np.searchsorted(ends, cut_val, side="right"))
+    ok = (before >= k_val + 1) & (before <= n - 1) & (cand > cut_val + gap)
+    if not ok.any():
+        return None
+    cut_test = int(cand[ok][np.argmin(np.abs(cand[ok] - t_test))])
+    idx = np.arange(N)
     train = idx[idx < cut_val]
     val = idx[(idx >= cut_val + gap) & (idx < cut_test)]
     test = idx[idx >= cut_test + gap]

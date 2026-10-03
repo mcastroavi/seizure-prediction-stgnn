@@ -114,9 +114,10 @@ start of a recording still gets the targets that match how close it is to the se
 - **Leave-one-patient-out (cross-subject):** train on 20 subjects, pick the epoch and the
   alarm threshold on 3 other subjects, test on the held-out subject. One fold per subject
   with seizures.
-- **Chronological (patient-specific):** within one subject, train on the earliest
-  seizures, validate on the next, test on later seizures and all data after them.
-  Subjects with fewer than 3 seizures are skipped.
+- **Chronological (patient-specific):** within one subject, train on the first ~50% of
+  the recording, validate on the next ~20%, test on the last ~30%. Cuts never split a
+  preictal period and each part has at least one seizure, so validation contains hours of
+  interictal data for choosing the alarm threshold. Subjects with fewer than 3 seizures are skipped.
 
 **From risk to alarms.** An alarm fires when at least 3 of the last 5 windows within one
 continuous recording exceed τ; further alarms are suppressed for 30 minutes. τ is chosen

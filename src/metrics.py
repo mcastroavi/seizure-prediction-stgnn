@@ -156,14 +156,14 @@ def select_threshold(val_sets: list[dict], mode: str = "fpr", target_fpr: float 
         scores = [f1_score(hard, probs >= t, zero_division=0) for t in grid]
         return float(grid[int(np.argmax(scores))])
 
-    best = None  # (meets_target, sensitivity, -fpr, tau)
+    best = None  # (meets_target, sensitivity, -fpr, tau): ties go to the higher, safer tau
     for t in grid:
         per = [event_metrics(raise_alarms(v["probs"], v["run"], t, k, n, refractory),
                              v["hard"], v["block"], window_sec, min_preictal_windows) for v in val_sets]
         s = summarize_events(per)
         sens = 0.0 if np.isnan(s["sensitivity"]) else s["sensitivity"]
         key = (s["fpr_per_hour"] <= target_fpr, sens if s["fpr_per_hour"] <= target_fpr else 0.0,
-               -s["fpr_per_hour"], -t)
+               -s["fpr_per_hour"], t)
         if best is None or key > best[0]:
             best = (key, float(t))
     return best[1]

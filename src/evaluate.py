@@ -37,8 +37,9 @@ def load_predictions(path: str) -> dict:
 
 
 def evaluate(results_dir, threshold_mode="fpr", target_fpr=0.5, k=3, n=5,
-             refractory_min=30.0, sop_min=30.0):
+             refractory_min=30.0, sop_min=30.0, min_preictal_min=10.0):
     refractory = int(round(refractory_min * 60 / WINDOW_SEC))
+    min_win = int(np.ceil(min_preictal_min * 60 / WINDOW_SEC))
     folds = sorted(d for d in os.listdir(results_dir)
                    if os.path.exists(os.path.join(results_dir, d, "predictions.npz")))
     if not folds:
@@ -49,11 +50,12 @@ def evaluate(results_dir, threshold_mode="fpr", target_fpr=0.5, k=3, n=5,
     for fold in folds:
         preds = load_predictions(os.path.join(results_dir, fold, "predictions.npz"))
         val_sets = list(preds["val"].values())
-        tau = select_threshold(val_sets, threshold_mode, target_fpr, k, n, refractory, WINDOW_SEC)
+        tau = select_threshold(val_sets, threshold_mode, target_fpr, k, n, refractory, WINDOW_SEC,
+                               min_preictal_windows=min_win)
 
         for subj, v in preds["test"].items():
             alarms = raise_alarms(v["probs"], v["run"], tau, k, n, refractory)
-            ev = event_metrics(alarms, v["hard"], v["block"], WINDOW_SEC)
+            ev = event_metrics(alarms, v["hard"], v["block"], WINDOW_SEC, min_win)
             wm = window_metrics(v["probs"], v["hard"], tau)
             events.append(ev)
             all_probs.append(v["probs"]); all_hard.append(v["hard"])
@@ -75,7 +77,9 @@ def evaluate(results_dir, threshold_mode="fpr", target_fpr=0.5, k=3, n=5,
         "threshold_mode": threshold_mode,
         "target_fpr": target_fpr if threshold_mode == "fpr" else None,
         "alarm_rule": f"{k}-of-{n} windows, refractory {refractory_min:g} min",
+        "alarm_k": k, "alarm_n": n, "refractory_min": refractory_min,
         "sop_min": sop_min,
+        "min_preictal_min": min_preictal_min,
         "n_test_subjects": len(subject_rows),
         "window_auc_pooled": float(window_metrics(probs, hard, 0.5)["auc"]),
         "window_auc_mean_per_subject": float(np.mean(aucs)) if aucs else float("nan"),
@@ -105,7 +109,9 @@ def _write(results_dir, summary, subject_rows, seizure_rows):
         "",
         f"Threshold chosen on validation subjects only ({s['threshold_mode']}"
         + (f", target ≤ {s['target_fpr']} FA/h" if s["target_fpr"] is not None else "") + "). "
-        f"Alarm rule: {s['alarm_rule']}. SOP: {s['sop_min']:g} min.",
+        f"Alarm rule: {s['alarm_rule']}. SOP: {s['sop_min']:g} min. "
+        f"Seizures with < {s['min_preictal_min']:g} min of recorded preictal data are not scored "
+        f"({s['seizures_skipped_short_preictal']} such seizures).",
         "",
         "| Metric | Value |",
         "| --- | --- |",
@@ -136,8 +142,11 @@ def main(argv=None):
     ap.add_argument("--n", type=int, default=5, help="... out of the last n to raise an alarm")
     ap.add_argument("--refractory_min", type=float, default=30.0)
     ap.add_argument("--sop_min", type=float, default=30.0)
+    ap.add_argument("--min_preictal_min", type=float, default=10.0,
+                    help="score only seizures with at least this much recorded preictal data")
     a = ap.parse_args(argv)
-    s = evaluate(a.results_dir, a.threshold_mode, a.target_fpr, a.k, a.n, a.refractory_min, a.sop_min)
+    s = evaluate(a.results_dir, a.threshold_mode, a.target_fpr, a.k, a.n, a.refractory_min,
+                 a.sop_min, a.min_preictal_min)
     print(open(os.path.join(a.results_dir, "results.md")).read())
     if not s["beats_chance_at_0.05"]:
         print("NOTE: sensitivity is not significantly better than a random predictor "

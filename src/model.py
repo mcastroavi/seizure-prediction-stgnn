@@ -1,7 +1,9 @@
 """ST-GNN (GATv2 spatial branch + temporal conv branch) with a single risk output.
 
-Layer names are identical to ``STGNN_Soft`` in chbmit_stgnn_v2.ipynb, so the existing
-checkpoint ``checkpoints/best_chbmit_soft.pt`` loads with ``load_checkpoint``.
+Layer names are identical to ``STGNN_Soft`` in the v2 notebook, so
+``legacy/checkpoints/best_chbmit_soft.pt`` still loads with ``load_checkpoint`` (it expects
+the v2 input format: 23 channels, 256 Hz). The number of channels and samples per window
+are read from the input, so the same class trains on the v3 format (18 channels, 128 Hz).
 """
 
 from __future__ import annotations
@@ -100,7 +102,7 @@ class SoftSeizureLoss(nn.Module):
     to reproduce the original behaviour exactly.
     """
 
-    def __init__(self, alpha=CFG["alpha"], pos_weight=CFG["pos_weight"], mse_on_logits=False):
+    def __init__(self, alpha=CFG["alpha"], pos_weight=1.0, mse_on_logits=False):
         super().__init__()
         self.alpha = alpha
         self.register_buffer("pos_weight", torch.tensor([pos_weight]))

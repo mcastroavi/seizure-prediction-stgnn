@@ -72,12 +72,20 @@ def raise_alarms(probs: np.ndarray, run: np.ndarray, tau: float, k: int = 3, n: 
 # ── Seizure level ────────────────────────────────────────────────────────────
 
 def event_metrics(alarms: np.ndarray, hard: np.ndarray, block: np.ndarray,
-                  window_sec: float = 5.0) -> dict:
-    """Per-subject event metrics. Windows must be in recording order."""
+                  window_sec: float = 5.0, min_preictal_windows: int = 1) -> dict:
+    """Per-subject event metrics. Windows must be in recording order.
+
+    Seizures with fewer than ``min_preictal_windows`` preictal windows recorded (e.g. a
+    seizure minutes after a recording starts) cannot fairly be predicted; they are left
+    out of the seizure count, and alarms inside them count neither way.
+    """
     alarms, hard, block = np.asarray(alarms), np.asarray(hard), np.asarray(block)
-    seizures = []
+    seizures, skipped = [], 0
     for b in np.unique(block[block >= 0]):
         idx = np.where(block == b)[0]
+        if len(idx) < min_preictal_windows:
+            skipped += 1
+            continue
         hits = idx[alarms[idx]]
         lead = (idx.max() - hits.min() + 1) * window_sec / 60 if len(hits) else None
         seizures.append({
@@ -93,6 +101,7 @@ def event_metrics(alarms: np.ndarray, hard: np.ndarray, block: np.ndarray,
         "n_predicted": sum(s["predicted"] for s in seizures),
         "false_alarms": false_alarms,
         "interictal_hours": interictal_h,
+        "seizures_skipped_short_preictal": skipped,
         "seizures": seizures,
     }
 
@@ -112,6 +121,7 @@ def summarize_events(per_subject: list[dict], sop_min: float = 30.0) -> dict:
 
     return {
         "seizures": n_sz,
+        "seizures_skipped_short_preictal": sum(r.get("seizures_skipped_short_preictal", 0) for r in per_subject),
         "predicted": n_pred,
         "sensitivity": sens,
         "false_alarms": fa,
@@ -129,7 +139,7 @@ def summarize_events(per_subject: list[dict], sop_min: float = 30.0) -> dict:
 
 def select_threshold(val_sets: list[dict], mode: str = "fpr", target_fpr: float = 0.5,
                      k: int = 3, n: int = 5, refractory: int = 360,
-                     window_sec: float = 5.0, grid=None) -> float:
+                     window_sec: float = 5.0, grid=None, min_preictal_windows: int = 1) -> float:
     """Pick ``tau`` on validation subjects only.
 
     ``val_sets`` holds one dict per validation subject with keys
@@ -149,7 +159,7 @@ def select_threshold(val_sets: list[dict], mode: str = "fpr", target_fpr: float 
     best = None  # (meets_target, sensitivity, -fpr, tau)
     for t in grid:
         per = [event_metrics(raise_alarms(v["probs"], v["run"], t, k, n, refractory),
-                             v["hard"], v["block"], window_sec) for v in val_sets]
+                             v["hard"], v["block"], window_sec, min_preictal_windows) for v in val_sets]
         s = summarize_events(per)
         sens = 0.0 if np.isnan(s["sensitivity"]) else s["sensitivity"]
         key = (s["fpr_per_hour"] <= target_fpr, sens if s["fpr_per_hour"] <= target_fpr else 0.0,

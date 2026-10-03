@@ -1,20 +1,20 @@
-"""Sanity-check processed segments before trusting event-level metrics.
+"""Sanity-check processed data before trusting event-level metrics.
 
-    python -m src.inspect_segments --processed_dir data/processed
+    python -m src.inspect_segments --processed_dir data/processed_v3   # v3 (from src.preprocess)
+    python -m src.inspect_segments --processed_dir data/processed      # v2 legacy segments.npz
 
-Event metrics (alarm smoothing, lead time, false alarms per hour) assume the windows in
-each ``segments.npz`` are stored in recording order. This prints, per subject:
+v3: prints, per subject, recorded hours, seizures, recorded preictal minutes per seizure,
+interictal hours, files skipped and why. Windows are chronological by construction.
 
-* the keys stored in the file (a recording id or start time makes contiguity exact),
-* how many ictal runs are directly preceded by a preictal run — close to 100% means the
-  windows are in chronological order; a low value means they were shuffled or sorted by
-  label, and the event metrics will not be meaningful,
-* seizure blocks found and hours of interictal data.
+v2 legacy: event metrics assume windows in ``segments.npz`` are in recording order. This
+reports how many ictal runs are directly preceded by a preictal run: close to 100% means
+chronological order; a low value means the windows were shuffled or sorted by label.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 
 import numpy as np
@@ -23,7 +23,6 @@ from .data import contiguous_runs, list_subjects, seizure_blocks
 
 
 def label_runs(y):
-    """Run-length encode a label sequence -> list of (label, length)."""
     runs = []
     for v in y:
         if runs and runs[-1][0] == v:
@@ -33,10 +32,21 @@ def label_runs(y):
     return runs
 
 
-def inspect(processed_dir, window_sec=5.0):
+def inspect_v3(processed_dir, subjects):
+    print(f"{'subject':8s} {'hours':>6s} {'seizures':>8s} {'>=10min pre':>11s} {'inter h':>8s} "
+          f"{'skipped':>7s}  preictal minutes per seizure")
+    for s in subjects:
+        r = json.load(open(os.path.join(processed_dir, s, "report.json")))
+        print(f"{s:8s} {r['hours_total']:6.1f} {r['seizures']:8d} {r['seizures_with_10min_preictal']:11d} "
+              f"{r['hours_interictal']:8.1f} {len(r['skipped']):7d}  {r['preictal_minutes_per_seizure']}")
+        for sk in r["skipped"]:
+            print(f"{'':10s}skipped {sk['file']}: {sk['reason']}")
+
+
+def inspect_legacy(processed_dir, subjects, window_sec=5.0):
     print(f"{'subject':8s} {'windows':>8s} {'ictal runs':>10s} {'pre->ictal':>10s} "
           f"{'blocks':>6s} {'inter h':>8s}  keys")
-    for s in list_subjects(processed_dir):
+    for s in subjects:
         seg = np.load(os.path.join(processed_dir, s, "segments.npz"), allow_pickle=True)
         y = np.array([str(v).lower() for v in seg["y"]])
         runs = label_runs(y)
@@ -49,15 +59,21 @@ def inspect(processed_dir, window_sec=5.0):
         frac = f"{preceded}/{len(ictal)}" if ictal else "n/a"
         print(f"{s:8s} {len(y):8d} {len(ictal):10d} {frac:>10s} {n_blocks:6d} "
               f"{np.sum(y == 'interictal') * window_sec / 3600:8.2f}  {seg.files}")
-    print("\nLabels present overall are those found in 'y'. If no 'ictal' windows were stored, "
-          "the pre->ictal check is unavailable; confirm ordering from your preprocessing script.")
+    print("\nIf no 'ictal' windows were stored, the pre->ictal check is unavailable; "
+          "re-run preprocessing with src.preprocess to get timestamped data.")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--processed_dir", required=True)
     a = ap.parse_args(argv)
-    inspect(a.processed_dir)
+    subjects = list_subjects(a.processed_dir)
+    v3 = [s for s in subjects if os.path.exists(os.path.join(a.processed_dir, s, "meta.npz"))]
+    if v3:
+        inspect_v3(a.processed_dir, v3)
+    legacy = [s for s in subjects if s not in v3]
+    if legacy:
+        inspect_legacy(a.processed_dir, legacy)
 
 
 if __name__ == "__main__":

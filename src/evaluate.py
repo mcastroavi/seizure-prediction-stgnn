@@ -20,8 +20,8 @@ from collections import defaultdict
 
 import numpy as np
 
-from .metrics import (event_metrics, raise_alarms, select_threshold, summarize_events,
-                      window_metrics)
+from .metrics import (event_metrics, lead_seizures, raise_alarms, select_threshold,
+                      summarize_events, window_metrics)
 
 WINDOW_SEC = 5.0
 
@@ -36,10 +36,32 @@ def load_predictions(path: str) -> dict:
     return out
 
 
+def non_lead_blocks(processed_dir, subject, gap_h):
+    """Seizure ids (block ids in v3 data) that are not lead seizures."""
+    meta = np.load(os.path.join(processed_dir, subject, "meta.npz"))
+    lead = lead_seizures(meta["seizures"], gap_h)
+    return set(np.where(~lead)[0].tolist())
+
+
 def evaluate(results_dir, threshold_mode="fpr", target_fpr=0.5, k=3, n=5,
-             refractory_min=30.0, sop_min=30.0, min_preictal_min=10.0):
+             refractory_min=30.0, sop_min=30.0, min_preictal_min=10.0,
+             lead_gap_h=0.0, processed_dir=None, out_dir=None):
+    """``lead_gap_h`` > 0 scores only lead seizures (needs ``processed_dir``), in validation
+    threshold selection and in testing. ``out_dir`` (default ``results_dir``) receives the tables."""
     refractory = int(round(refractory_min * 60 / WINDOW_SEC))
     min_win = int(np.ceil(min_preictal_min * 60 / WINDOW_SEC))
+    if lead_gap_h > 0 and not processed_dir:
+        raise SystemExit("--lead_gap_h needs --processed_dir (for the seizure times)")
+    out_dir = out_dir or results_dir
+    os.makedirs(out_dir, exist_ok=True)
+    skip_cache = {}
+
+    def skips(subj):
+        if lead_gap_h <= 0:
+            return None
+        if subj not in skip_cache:
+            skip_cache[subj] = non_lead_blocks(processed_dir, subj, lead_gap_h)
+        return skip_cache[subj]
     folds = sorted(d for d in os.listdir(results_dir)
                    if os.path.exists(os.path.join(results_dir, d, "predictions.npz")))
     if not folds:
@@ -49,13 +71,17 @@ def evaluate(results_dir, threshold_mode="fpr", target_fpr=0.5, k=3, n=5,
     all_probs, all_hard = [], []
     for fold in folds:
         preds = load_predictions(os.path.join(results_dir, fold, "predictions.npz"))
-        val_sets = list(preds["val"].values())
+        val_sets = []
+        for subj, v in preds["val"].items():
+            v = dict(v)
+            v["skip_blocks"] = skips(subj)
+            val_sets.append(v)
         tau = select_threshold(val_sets, threshold_mode, target_fpr, k, n, refractory, WINDOW_SEC,
                                min_preictal_windows=min_win)
 
         for subj, v in preds["test"].items():
             alarms = raise_alarms(v["probs"], v["run"], tau, k, n, refractory)
-            ev = event_metrics(alarms, v["hard"], v["block"], WINDOW_SEC, min_win)
+            ev = event_metrics(alarms, v["hard"], v["block"], WINDOW_SEC, min_win, skips(subj))
             wm = window_metrics(v["probs"], v["hard"], tau)
             events.append(ev)
             all_probs.append(v["probs"]); all_hard.append(v["hard"])
@@ -80,13 +106,14 @@ def evaluate(results_dir, threshold_mode="fpr", target_fpr=0.5, k=3, n=5,
         "alarm_k": k, "alarm_n": n, "refractory_min": refractory_min,
         "sop_min": sop_min,
         "min_preictal_min": min_preictal_min,
+        "lead_gap_h": lead_gap_h,
         "n_test_subjects": len(subject_rows),
         "window_auc_pooled": float(window_metrics(probs, hard, 0.5)["auc"]),
         "window_auc_mean_per_subject": float(np.mean(aucs)) if aucs else float("nan"),
         "window_auc_std_per_subject": float(np.std(aucs)) if aucs else float("nan"),
     })
 
-    _write(results_dir, summary, subject_rows, seizure_rows)
+    _write(out_dir, summary, subject_rows, seizure_rows, results_dir)
     return summary
 
 
@@ -94,12 +121,13 @@ def _fmt(x, nd=3):
     return "—" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:.{nd}f}"
 
 
-def _write(results_dir, summary, subject_rows, seizure_rows):
-    with open(os.path.join(results_dir, "results.json"), "w") as f:
+def _write(out_dir, summary, subject_rows, seizure_rows, results_dir=None):
+    results_dir = results_dir or out_dir
+    with open(os.path.join(out_dir, "results.json"), "w") as f:
         json.dump({"summary": summary, "subjects": subject_rows}, f, indent=2)
     for name, rows in (("per_subject.csv", subject_rows), ("per_seizure.csv", seizure_rows)):
         if rows:
-            with open(os.path.join(results_dir, name), "w", newline="") as f:
+            with open(os.path.join(out_dir, name), "w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
                 w.writeheader(); w.writerows(rows)
 
@@ -111,7 +139,9 @@ def _write(results_dir, summary, subject_rows, seizure_rows):
         + (f", target ≤ {s['target_fpr']} FA/h" if s["target_fpr"] is not None else "") + "). "
         f"Alarm rule: {s['alarm_rule']}. SOP: {s['sop_min']:g} min. "
         f"Seizures with < {s['min_preictal_min']:g} min of recorded preictal data are not scored "
-        f"({s['seizures_skipped_short_preictal']} such seizures).",
+        f"({s['seizures_skipped_short_preictal']} such seizures)."
+        + (f" Lead seizures only: seizures starting < {s['lead_gap_h']:g} h after the previous one "
+           f"are not scored ({s['seizures_skipped_non_lead']} such seizures)." if s.get("lead_gap_h") else ""),
         "",
         "| Metric | Value |",
         "| --- | --- |",
@@ -129,7 +159,7 @@ def _write(results_dir, summary, subject_rows, seizure_rows):
     for r in subject_rows:
         md.append(f"| {r['subject']} | {r['tau']:.2f} | {_fmt(r['auc'])} | "
                   f"{r['predicted']}/{r['seizures']} | {_fmt(r['fpr_per_h'], 2)} |")
-    with open(os.path.join(results_dir, "results.md"), "w") as f:
+    with open(os.path.join(out_dir, "results.md"), "w") as f:
         f.write("\n".join(md) + "\n")
 
 
@@ -144,10 +174,16 @@ def main(argv=None):
     ap.add_argument("--sop_min", type=float, default=30.0)
     ap.add_argument("--min_preictal_min", type=float, default=10.0,
                     help="score only seizures with at least this much recorded preictal data")
+    ap.add_argument("--lead_gap_h", type=float, default=0.0,
+                    help="score only lead seizures: those starting at least this many hours after "
+                         "the previous seizure ended (common choice: 4). Needs --processed_dir")
+    ap.add_argument("--processed_dir", default=None)
+    ap.add_argument("--out_dir", default=None,
+                    help="where to write the tables (default: results_dir); e.g. results_dir/lead4h")
     a = ap.parse_args(argv)
     s = evaluate(a.results_dir, a.threshold_mode, a.target_fpr, a.k, a.n, a.refractory_min,
-                 a.sop_min, a.min_preictal_min)
-    print(open(os.path.join(a.results_dir, "results.md")).read())
+                 a.sop_min, a.min_preictal_min, a.lead_gap_h, a.processed_dir, a.out_dir)
+    print(open(os.path.join(a.out_dir or a.results_dir, "results.md")).read())
     if not s["beats_chance_at_0.05"]:
         print("NOTE: sensitivity is not significantly better than a random predictor "
               "with the same false-alarm rate (p >= 0.05).")

@@ -37,6 +37,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 
 from . import baseline as bl
+from .context_features import extra_features
 from .data import SubjectData, list_subjects, load_subject
 from .model import SoftSeizureLoss, STGNN_Soft
 from .splits import chronological_split, lopo_folds
@@ -205,7 +206,14 @@ def main(argv=None):
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--n_val", type=int, default=3)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--extra", default="",
+                    help="comma-separated extra inputs per window: time (hour of day), "
+                         "history (time since last seizure, floored at the labelling buffer)")
     args = ap.parse_args(argv)
+    extras = [x for x in args.extra.split(",") if x]
+    for x in extras:
+        if x not in ("time", "history"):
+            ap.error(f"unknown --extra '{x}'")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp = torch.bfloat16 if device.type == "cuda" else None
@@ -238,7 +246,8 @@ def main(argv=None):
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"context model | protocol={protocol} | vectors="
           f"{'ST-GNN embeddings from ' + args.source if args.source else 'hand-crafted ' + args.features} "
-          f"| history {args.seq_len} windows ({args.seq_len * 5 / 60:.0f} min)")
+          f"| history {args.seq_len} windows ({args.seq_len * 5 / 60:.0f} min)"
+          f"{' | extra: ' + ','.join(extras) if extras else ''}")
 
     for name, info in folds.items():
         t0 = time.time()
@@ -254,6 +263,9 @@ def main(argv=None):
                 fit = fit[np.random.default_rng(args.seed).choice(len(fit), 200000, replace=False)]
             scaler = StandardScaler().fit(fit)
             vec = {k: np.clip(scaler.transform(v), -8, 8).astype(np.float32) for k, v in raw.items()}
+        if extras:
+            vec = {id(p): np.concatenate([vec[id(p)], extra_features(p, extras)], axis=1).astype(np.float32)
+                   for p in tr + va + te}
         print(f"\n== {name}: vectors ready in {time.time() - t0:.0f}s "
               f"(train {sum(len(p) for p in tr)} | val {sum(len(p) for p in va)} | test {sum(len(p) for p in te)})")
 
@@ -277,7 +289,7 @@ def main(argv=None):
                    os.path.join(fd, "context.pt"))
         with open(os.path.join(fd, "fold.json"), "w") as fh:
             json.dump({"fold": name, "protocol": protocol, "model": "context_gru",
-                       "vectors": args.source or f"handcrafted_{args.features}",
+                       "vectors": args.source or f"handcrafted_{args.features}", "extra": extras,
                        "train": [p.subject for p in tr] if protocol == "lopo" else [name],
                        "val": [p.subject for p in va], "test": [p.subject for p in te],
                        "best_val_auc": best, "history": hist, "args": vars(args)}, fh, indent=2)

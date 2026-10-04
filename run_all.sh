@@ -10,8 +10,10 @@ set -euo pipefail
 RAW=${1:?usage: bash run_all.sh /path/to/chb-mit}
 P=data/processed_v3
 
-ev() {  # seizure-level metrics + figures for one results dir
+ev() {  # seizure-level metrics (all seizures, then lead seizures only) + figures
   python -m src.evaluate --results_dir "results/$1"
+  python -m src.evaluate --results_dir "results/$1" --lead_gap_h 4 --processed_dir "$P" \
+    --out_dir "results/$1/lead4h"
   python -m src.figures  --results_dir "results/$1"
 }
 
@@ -30,7 +32,13 @@ for PR in lopo chrono; do
   python -m src.context --processed_dir "$P" --protocol $PR --features bands --out_dir results/context_feat_$PR
   python -m src.context --processed_dir "$P" --source results/stgnn_$PR --out_dir results/context_stgnn_$PR
   python -m src.context --processed_dir "$P" --source results/stgnn_bands_$PR --out_dir results/context_stgnn_bands_$PR
-  for R in baseline baseline_bands stgnn stgnn_bands context_feat context_stgnn context_stgnn_bands; do
+  # context extras: time of day, seizure history, both
+  for X in time:time hist:history timehist:time,history; do
+    python -m src.context --processed_dir "$P" --source results/stgnn_bands_$PR \
+      --extra ${X#*:} --out_dir results/context_stgnn_bands_${X%%:*}_$PR
+  done
+  for R in baseline baseline_bands stgnn stgnn_bands context_feat context_stgnn context_stgnn_bands \
+           context_stgnn_bands_time context_stgnn_bands_hist context_stgnn_bands_timehist; do
     ev ${R}_$PR
   done
 done

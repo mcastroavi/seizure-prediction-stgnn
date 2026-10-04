@@ -137,6 +137,11 @@ def summarize_events(per_subject: list[dict], sop_min: float = 30.0) -> dict:
 
 # ── Threshold selection (validation data only) ───────────────────────────────
 
+# Coarse steps, then fine steps near 1: confident models need thresholds above 0.95
+# (with a 0.95 ceiling, most subjects' validation-optimal threshold sat at the ceiling).
+THRESHOLD_GRID = np.unique(np.round(np.concatenate([
+    np.arange(0.05, 0.951, 0.05), [0.96, 0.97, 0.98, 0.985, 0.99, 0.995, 0.998, 0.999]]), 3))
+
 def select_threshold(val_sets: list[dict], mode: str = "fpr", target_fpr: float = 0.5,
                      k: int = 3, n: int = 5, refractory: int = 360,
                      window_sec: float = 5.0, grid=None, min_preictal_windows: int = 1) -> float:
@@ -149,7 +154,7 @@ def select_threshold(val_sets: list[dict], mode: str = "fpr", target_fpr: float 
     mode="fpr" : maximise seizure sensitivity subject to FPR/h <= ``target_fpr``;
                  if no threshold meets the target, return the one with the lowest FPR/h.
     """
-    grid = np.round(np.arange(0.05, 0.96, 0.05), 2) if grid is None else grid
+    grid = THRESHOLD_GRID if grid is None else grid
     if mode == "f1":
         probs = np.concatenate([v["probs"] for v in val_sets])
         hard = np.concatenate([v["hard"] for v in val_sets])

@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 from .evaluate import WINDOW_SEC, load_predictions  # noqa: E402
-from .metrics import event_metrics, raise_alarms, summarize_events  # noqa: E402
+from .metrics import THRESHOLD_GRID, event_metrics, raise_alarms, summarize_events  # noqa: E402
 
 # Reference palette (light mode) — roles, not decoration
 SURFACE = "#fcfcfb"
@@ -113,7 +113,7 @@ def per_subject(rows, out_path):
 
 def operating_curve(preds_by_fold, out_path, k=3, n=5, refractory=360, sop_min=30, min_win=120,
                     model_name="ST-GNN"):
-    grid = np.round(np.arange(0.05, 0.96, 0.025), 3)
+    grid = np.unique(np.concatenate([np.round(np.arange(0.05, 0.96, 0.025), 3), THRESHOLD_GRID]))
     sens, fpr = [], []
     tests = [v for p in preds_by_fold.values() for v in p["test"].values()]
     for t in grid:

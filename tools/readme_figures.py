@@ -37,7 +37,9 @@ ABLATION = [  # (label, run)
     ("Context GRU on ST-GNN", "context_stgnn_lopo"),
     ("Context GRU on ST-GNN + bands", BEST),
     ("  + augmentation", "context_stgnn_bands_aug_lopo"),
+    ("  + time of day & seizure history", "context_stgnn_bands_timehist_lopo"),
 ]
+ABLATION_LEAD = [(lab, f"{run}/lead4h") for lab, run in ABLATION]
 PERSONALIZATION = [
     ("Patient-specific, from scratch", "context_stgnn_bands_chrono"),
     ("General model, threshold calibrated", "personalized/general"),
@@ -53,7 +55,7 @@ def export(results_dir, out):
     from src.metrics import THRESHOLD_GRID, event_metrics, raise_alarms, summarize_events
 
     runs = {}
-    for _, run in ABLATION + PERSONALIZATION:
+    for _, run in ABLATION + ABLATION_LEAD + PERSONALIZATION:
         p = os.path.join(results_dir, run, "results.json")
         if os.path.exists(p):
             runs[run] = json.load(open(p))["summary"]
@@ -142,7 +144,8 @@ def render(data_path, out_dir):
         a1.scatter(rnd, y, marker="|", s=260, linewidths=2.5, color=ORANGE, zorder=3,
                    label="Random predictor, same false-alarm rate")
         for yi, (_, s) in zip(y, rows):
-            a1.text(s["sensitivity"] + 0.01, yi, f"{s['predicted']}/{s['seizures']}", va="center",
+            a1.text(max(s["sensitivity"], s["random_predictor_sensitivity"]) + 0.012, yi,
+                    f"{s['predicted']}/{s['seizures']}", va="center",
                     fontsize=9, color=TEXT_2)
         a1.set_xlim(0, max(sens) * 1.25)
         a1.set_xlabel("Seizure sensitivity")
@@ -161,8 +164,12 @@ def render(data_path, out_dir):
         fig.savefig(os.path.join(out_dir, fname), dpi=130)
         plt.close(fig)
 
-    two_panel(ABLATION, "Ablation — leave-one-patient-out (24 unseen patients)", "ablation_lopo.png",
+    two_panel(ABLATION, "All seizures — leave-one-patient-out (24 unseen patients)", "ablation_lopo.png",
               "151 seizures with ≥10 min of recorded preictal data. Alarm threshold chosen on validation patients only.")
+    two_panel(ABLATION_LEAD, "Lead seizures only — leave-one-patient-out (24 unseen patients)",
+              "ablation_lead.png",
+              "65 seizures starting ≥4 h after the previous one; clustered seizures not scored. "
+              "Threshold chosen on validation patients' lead seizures.")
     two_panel(PERSONALIZATION, "Personalization — last 30% of each patient's recording (13 patients)",
               "personalization.png",
               "31 test seizures; all variants use the same test data and choose the threshold on the patient's validation part.")

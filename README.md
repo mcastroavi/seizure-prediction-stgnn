@@ -21,18 +21,24 @@ channels and whose edges are Phase Locking Values (PLV) in several frequency ban
 attention network embeds each window; a recurrent model reads the last 5 minutes of
 embeddings and outputs a **continuous risk score** that rises toward onset.
 
-**Result (24 patients, each tested without ever being seen in training, 151 seizures):**
+**Result (24 patients, each tested by a model that never saw them):**
 
-| | Best model |
-|---|---|
-| Seizures predicted | **66 / 151 (44%)** |
-| False alarms | **0.37 per hour** (about one every 2.7 hours) |
-| Mean warning time | **19.4 minutes** before onset |
-| Random predictor at the same false-alarm rate | 17% of seizures |
-| Significance vs. chance | p = 9 × 10⁻¹⁵ |
+| Best model | All seizures | Lead seizures only |
+|---|---|---|
+| Seizures predicted | **66 / 151 (44%)** | **21 / 65 (32%)** |
+| False alarms per hour | 0.37 | 0.33 (about one every 3 hours) |
+| Mean warning time | 19.4 min | 20.7 min |
+| Random predictor at the same false-alarm rate | 17% | 15% |
+| p vs. chance | 9 × 10⁻¹⁵ | 4 × 10⁻⁴ |
 
-Fine-tuning that general model on a patient's own early recordings improves it further
-for that patient (Section 7.3).
+**Lead seizures** (starting ≥ 4 h after the previous one) are the stricter test. Many
+CHB-MIT seizures come in clusters, and a model can catch those by learning "another
+seizure is likely soon" rather than by recognising pre-seizure EEG. On lead seizures,
+only the models that combine ST-GNN embeddings with minutes of context stay clearly
+better than chance. Adding the time since the last seizure raises all-seizure
+sensitivity to 54% (a useful seizure-cluster warning) but does not help on lead
+seizures (Section 7.1). Personalization results are promising but too small to be
+conclusive (Section 7.3).
 
 **How this version came about.** v2 reported a window-level AUC of 0.883 using a random
 split that leaked information between training and test data. v3 rebuilds everything, from
@@ -139,6 +145,10 @@ on validation data only, maximising seizure sensitivity subject to ≤ 0.5 false
   with probability p = 1 − exp(−FPR × SOP) (Schelter et al., 2006); a binomial test gives
   the p-value of the model's sensitivity against it.
 - Seizures with < 10 min of recorded preictal data are not scored (26 in leave-one-patient-out).
+- **Lead seizures:** every result is also reported for lead seizures only, those starting
+  ≥ 4 h after the end of the previous seizure (65 of the 177 test seizures with enough
+  preictal data in leave-one-patient-out). Clustered seizures then count neither as hits nor
+  misses, also when the threshold is chosen on validation data.
 - Window-level ROC-AUC per subject is reported for comparison with other work.
 
 ---
@@ -150,7 +160,7 @@ on validation data only, maximising seizure sensitivity subject to ≤ 0.5 false
 pip install torch --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 
-python -m pytest tests                    # 36 tests, CPU, < 1 min, no dataset needed
+python -m pytest tests                    # 42 tests, CPU, < 1 min, no dataset needed
 bash run_all.sh /path/to/chb-mit          # every result in this README, end to end
 jupyter notebook notebooks/stgnn_v3_walkthrough.ipynb   # or step through it cell by cell
 ```
@@ -163,7 +173,13 @@ python -m src.preprocess --raw_dir /path/to/chb-mit --out_dir $P --workers 4
 python -m src.train   --processed_dir $P --protocol lopo --features bands --out_dir results/stgnn_bands_lopo
 python -m src.context --processed_dir $P --source results/stgnn_bands_lopo --out_dir results/context_stgnn_bands_lopo
 python -m src.evaluate --results_dir results/context_stgnn_bands_lopo
+python -m src.evaluate --results_dir results/context_stgnn_bands_lopo \
+    --lead_gap_h 4 --processed_dir $P --out_dir results/context_stgnn_bands_lopo/lead4h
 python -m src.figures  --results_dir results/context_stgnn_bands_lopo
+
+# context model with hour of day and time since the last seizure
+python -m src.context --processed_dir $P --source results/stgnn_bands_lopo --extra time,history \
+    --out_dir results/context_stgnn_bands_timehist_lopo
 
 # personalization (uses the leave-one-patient-out models above)
 python -m src.personalize --processed_dir $P --general_encoder results/stgnn_bands_lopo \
@@ -181,6 +197,7 @@ data/synthetic` builds small synthetic EDF files with CHB-MIT's quirks.
 |---|---|
 | Window encoder | Adam, lr 3e-4, weight decay 1e-4, cosine schedule; 30 epochs × 40,000 class-balanced windows; early stopping (patience 8) on validation AUC; batch 128; dropout 0.4; BF16 on CUDA |
 | Context model | GRU, hidden 64, 60-window (5-min) history; Adam, lr 1e-3; early stopping (patience 6) |
+| Context extras (optional) | hour of day (sin, cos); log time since the last seizure ended, clipped to [1 h, 72 h]; has-previous-seizure flag |
 | Personalization | encoder lr 1e-4 (≤ 10 epochs), context lr 3e-4 (≤ 15 epochs), early stopping on the patient's validation part |
 | Loss | α = 0.5 MSE / BCE |
 
@@ -189,57 +206,79 @@ data/synthetic` builds small synthetic EDF files with CHB-MIT's quirks.
 ## 7. Results
 
 All numbers are on held-out data, produced by `src.evaluate`. Every run uses the same alarm
-rule and chooses its threshold on validation data only.
+rule and chooses its threshold on validation data only. Each model is scored on **all
+seizures** and on **lead seizures only** (Section 4).
 
 ### 7.1 Ablation: what each component contributes (leave-one-patient-out)
 
-24 patients, each tested by a model that never saw them; 151 scored seizures, 766 interictal hours.
+24 patients, each tested by a model that never saw them; 766 interictal hours.
 
-| Model | Seizures predicted | False alarms / h | Random predictor | p vs. chance | Mean lead time | Window AUC |
-|---|---|---|---|---|---|---|
-| Logistic regression (PLV + power) | 41 (27%) | 0.40 | 18% | 0.005 | 17.9 min | 0.53 ± 0.09 |
-| Logistic regression + band features | 49 (32%) | 0.47 | 21% | 6 × 10⁻⁴ | 16.7 min | 0.53 ± 0.10 |
-| ST-GNN (5-s windows) | 64 (42%) | 0.66 | 28% | 1 × 10⁻⁴ | 14.6 min | 0.52 ± 0.13 |
-| ST-GNN + band features | 52 (34%) | 0.53 | 23% | 0.001 | 16.9 min | 0.52 ± 0.13 |
-| Context GRU on hand-crafted features | 48 (32%) | 0.54 | 24% | 0.014 | 18.7 min | 0.57 ± 0.15 |
-| Context GRU on ST-GNN | 68 (45%) | 0.52 | 23% | 2 × 10⁻⁹ | 18.3 min | 0.56 ± 0.16 |
-| **Context GRU on ST-GNN + bands** | **66 (44%)** | **0.37** | **17%** | **9 × 10⁻¹⁵** | **19.4 min** | 0.56 ± 0.15 |
-| … + training-time augmentation | 64 (42%) | 0.49 | 22% | 1 × 10⁻⁸ | 17.7 min | 0.54 ± 0.15 |
+| Model | All seizures (151): predicted | FA/h | p | Lead seizures (65): predicted | FA/h | chance | p |
+|---|---|---|---|---|---|---|---|
+| Logistic regression (PLV + power) | 41 (27%) | 0.40 | 0.005 | 7 (11%) | 0.25 | 12% | 0.64 |
+| Logistic regression + band features | 49 (32%) | 0.47 | 6 × 10⁻⁴ | 16 (25%) | 0.40 | 18% | 0.12 |
+| ST-GNN (5-s windows) | 64 (42%) | 0.66 | 1 × 10⁻⁴ | 17 (26%) | 0.56 | 24% | 0.41 |
+| ST-GNN + band features | 52 (34%) | 0.53 | 0.001 | 16 (25%) | 0.40 | 18% | 0.12 |
+| ST-GNN + bands + augmentation | 49 (32%) | 0.62 | 0.06 | 22 (34%) | 0.46 | 21% | 0.008 |
+| Context GRU on hand-crafted features | 48 (32%) | 0.54 | 0.014 | 18 (28%) | 0.41 | 19% | 0.046 |
+| Context GRU on ST-GNN | 68 (45%) | 0.52 | 2 × 10⁻⁹ | **26 (40%)** | 0.48 | 21% | 4 × 10⁻⁴ |
+| **Context GRU on ST-GNN + bands** | **66 (44%)** | **0.37** | **9 × 10⁻¹⁵** | **21 (32%)** | **0.33** | **15%** | **4 × 10⁻⁴** |
+| … + augmentation | 64 (42%) | 0.49 | 1 × 10⁻⁸ | 16 (25%) | 0.40 | 18% | 0.13 |
+| … + time of day | 49 (32%) | 0.40 | 2 × 10⁻⁵ | 14 (22%) | 0.36 | 17% | 0.18 |
+| … + seizure history | **88 (58%)** | 0.44 | 5 × 10⁻²⁵ | 16 (25%) | 0.37 | 17% | 0.07 |
+| … + time of day & seizure history | 81 (54%) | **0.34** | 5 × 10⁻²⁷ | 21 (32%) | 0.32 | 15% | 2 × 10⁻⁴ |
 
-![Ablation](docs/figures/ablation_lopo.png)
+![Ablation, all seizures](docs/figures/ablation_lopo.png)
+
+![Ablation, lead seizures](docs/figures/ablation_lead.png)
 
 **What this shows**
 
-- **Minutes of context is the most valuable component for the graph network.** Adding the
-  5-minute GRU improved both ST-GNN variants on both axes at once (more seizures, fewer
-  false alarms), mainly by suppressing isolated false alarms. On hand-crafted features it
-  did not beat plain logistic regression (48 vs 49 seizures, 0.54 vs 0.47 false alarms/h).
-- **Band features help only with context.** Alone they made the ST-GNN worse (64 → 52
-  seizures): a single 5-s window with 306 six-feature edges is noisy. Over 5 minutes, the
-  richer features pay off: the best model has the lowest false-alarm rate of all.
-- **The graph network adds something hand-crafted features don't.** With the same context
-  model, ST-GNN embeddings predict 66–68 seizures; hand-crafted band features predict 48.
-- **Augmentation hurt** (time shift, noise, masking, channel gain, channel dropout, PLV
-  jitter): fewer seizures, more false alarms. The main difficulty is variability *between*
-  patients, which within-patient perturbations don't simulate, and noise blurs an already
-  subtle signal.
-- **Window AUC stays near 0.55** although alarms are far better than chance: most windows
-  are hard to tell apart, but the model's high-confidence episodes cluster before seizures.
-  Event-level metrics are what matter for a warning system.
+- **Lead seizures are much harder.** Only 65 of 177 test seizures are lead seizures; the
+  rest follow another seizure within 4 hours, mostly in a few patients (chb12, chb24).
+  On lead seizures, logistic regression and the window-level ST-GNN no longer beat chance.
+- **ST-GNN embeddings plus minutes of context is the result that survives.** Both context
+  models on ST-GNN embeddings stay clearly better than chance on lead seizures
+  (p < 0.001); the same context model on hand-crafted features is borderline (p = 0.046).
+  The 5-minute context also improved both ST-GNN variants on all seizures, mainly by
+  suppressing isolated false alarms.
+- **Band features shift the operating point rather than adding signal.** With context they
+  give the lowest false-alarm rates (0.33–0.37/h) but catch fewer lead seizures (21 vs 26);
+  the margin over chance is similar.
+- **Seizure history predicts clusters, not seizures.** Adding the time since the last
+  seizure lifts all-seizure sensitivity from 44% to 58%, yet gives nothing on lead seizures.
+  The model learns that seizures come in clusters. That is clinically useful as a cluster
+  warning, but it is not pre-seizure EEG prediction. (The feature is floored at the 60-min
+  labelling buffer so it cannot exploit the labelling rule itself; see `src/context_features.py`.)
+- **Time of day does not transfer between patients.** Each patient's daily seizure pattern
+  differs, so one learned from others adds noise. Combined with seizure history it gives the
+  best all-seizure model (54% at 0.34 false alarms/h), equal to the best on lead seizures.
+- **Augmentation did not help** (time shift, noise, masking, channel gain, channel dropout,
+  PLV jitter). The window-level model with augmentation does reach p = 0.008 on lead
+  seizures, but its context version drops to chance; with 65 seizures, differences of a few
+  seizures are within noise. The main difficulty is variability *between* patients, which
+  within-patient perturbations do not simulate.
+- **Window AUC stays near 0.55** although alarms beat chance: most windows are hard to tell
+  apart, but high-confidence episodes cluster before seizures. Event-level metrics are what
+  matter for a warning system.
 
-![Sensitivity vs false alarms](docs/figures/operating_curve.png)
+![Sensitivity vs false alarms, all seizures](docs/figures/operating_curve.png)
 
 ### 7.2 Per patient: large differences
 
+Counted over all seizures. The best model works well for some patients and not at all for
+others.
+
 ![Per patient](docs/figures/per_subject.png)
 
-The best model works well for some patients and not at all for others. chb20 below: 6 of 8
-seizures predicted with 0.44 false alarms/h, by a model that never saw this patient.
+chb20, never seen in training: 6 of 8 seizures predicted (both lead seizures among them)
+with 0.44 false alarms/h.
 
 ![Risk timeline, chb20](docs/figures/risk_timeline_chb20.png)
 
-chb15: none of 15 seizures predicted. Its risk stays low before every seizure; whatever
-precedes this patient's seizures is not the pattern the other patients taught the model.
+chb15: none of 15 seizures predicted (7 of them lead seizures). Its risk stays low before
+every seizure; whatever precedes this patient's seizures is not the pattern the other
+patients taught the model.
 
 ![Risk timeline, chb15](docs/figures/risk_timeline_chb15.png)
 
@@ -247,42 +286,48 @@ precedes this patient's seizures is not the pattern the other patients taught th
 
 The 13 patients with ≥ 3 seizures. Each starts from the leave-one-patient-out model that
 never saw them, adapts on the first ~50% of their recording, and is tested on the last ~30%
-(31 seizures, 115 interictal hours).
+(115 interictal hours).
 
-| Variant | Seizures predicted | False alarms / h | Random predictor | p vs. chance | Window AUC |
-|---|---|---|---|---|---|
-| Patient-specific model trained from scratch | 7 | 0.14 | 7% | 0.004 | 0.60 |
-| General model, only the threshold calibrated | 6 | 0.15 | 7% | 0.02 | 0.59 |
-| General model + fine-tuned context GRU | 11 | 0.42 | 19% | 0.02 | 0.65 |
-| **General model + fine-tuned encoder and context** | **9** | **0.24** | **11%** | **0.005** | **0.62** |
+| Variant | All (31): predicted | FA/h | p | Lead (16): predicted | FA/h | p |
+|---|---|---|---|---|---|---|
+| Patient-specific model trained from scratch | 7 | 0.14 | 0.004 | 1 | 0.09 | 0.50 |
+| General model, only the threshold calibrated | 6 | 0.15 | 0.02 | 3 | 0.12 | 0.07 |
+| General model + fine-tuned context GRU | 11 | 0.42 | 0.02 | 5 | 0.31 | 0.06 |
+| General model + fine-tuned encoder and context | 9 | 0.24 | 0.005 | 2 | 0.17 | 0.39 |
 
 ![Personalization](docs/figures/personalization.png)
 
-- **Starting from the general model beats starting from nothing:** both fine-tuned variants
-  predict more seizures and separate preictal from normal EEG better than a patient-specific
-  model trained only on that patient's data.
-- **Fine-tuning everything is the most balanced option.** Fine-tuning only the context model
-  catches the most seizures, but with about three times the false-alarm rate of the
-  calibrated general model (0.42 vs 0.15 per hour).
-- It fixes patients the general model fails on: chb01 goes from 0/1 (window AUC 0.53) to 1/1 (0.74).
-- With 31 test seizures, differences of 2–4 seizures are suggestive rather than conclusive.
+- **On all seizures, starting from the general model beats starting from nothing:** both
+  fine-tuned variants predict more seizures and separate preictal from normal EEG better
+  (window AUC 0.62–0.65 vs 0.60) than a model trained only on the patient's own data.
+- It fixes some patients the general model fails on: chb01 goes from 0/1 (window AUC 0.53)
+  to 1/1 (0.74) after full fine-tuning.
+- **On lead seizures the comparison is inconclusive:** only 16 lead seizures fall in the
+  patient-specific test periods, and no variant is significantly better than chance. Part
+  of the all-seizure gain may come from clustered seizures. A larger patient-specific test
+  set (more patients or longer recordings) is needed to settle it.
 
 ### 7.4 Patient-specific models (chronological protocol)
 
 Same 13 patients and test data as 7.3, models trained only on each patient's own data.
 
-| Model | Seizures predicted | False alarms / h | p vs. chance |
-|---|---|---|---|
-| Logistic regression | 7 | 0.31 | 0.15 |
-| Logistic regression + bands | 8 | 0.17 | 0.003 |
-| ST-GNN | 6 | 0.16 | 0.03 |
-| ST-GNN + bands | 6 | 0.27 | 0.19 |
-| Context GRU, hand-crafted features | 9 | 0.21 | 0.002 |
-| Context GRU on ST-GNN | 7 | 0.17 | 0.01 |
-| Context GRU on ST-GNN + bands | 7 | 0.14 | 0.004 |
+| Model | All (31): predicted | FA/h | p | Lead (16): predicted | p |
+|---|---|---|---|---|---|
+| Logistic regression | 7 | 0.31 | 0.15 | 2 | 0.46 |
+| Logistic regression + bands | 8 | 0.17 | 0.003 | 2 | 0.34 |
+| ST-GNN | 6 | 0.16 | 0.03 | 0 | 1.0 |
+| ST-GNN + bands | 6 | 0.27 | 0.19 | 0 | 1.0 |
+| Context GRU, hand-crafted features | 9 | 0.21 | 0.002 | 4 | 0.05 |
+| Context GRU on ST-GNN | 7 | 0.17 | 0.01 | 1 | 0.57 |
+| Context GRU on ST-GNN + bands | 7 | 0.14 | 0.004 | 1 | 0.50 |
+| … + seizure history | 11 | 0.20 | 8 × 10⁻⁵ | 5 | 0.001 |
+| … + time of day & seizure history | 9 | 0.22 | 0.003 | 4 | 0.02 |
 
 With only the first half of one patient's recording (often 2–3 seizures) for training,
-all models are data-limited, which is why pretraining on other patients (7.3) helps.
+all models are data-limited. One suggestive exception: a patient's *own* seizure history
+helps even on lead seizures (5 of 16, p = 0.001), unlike the population-level history in
+7.1; individual seizure timing may carry information beyond clustering. Sixteen seizures
+are too few to claim it.
 
 ---
 
@@ -322,6 +367,7 @@ seizure-prediction-stgnn/
 │   ├── train.py             ← window-encoder training + predictions per fold
 │   ├── augment.py           ← training-time augmentation
 │   ├── context.py           ← 5-minute context GRU
+│   ├── context_features.py  ← hour of day, time since last seizure (leak-guarded)
 │   ├── personalize.py       ← fine-tune the general model per patient
 │   ├── baseline.py          ← logistic-regression baseline
 │   ├── metrics.py           ← alarms, seizure-level metrics, threshold selection
@@ -330,7 +376,7 @@ seizure-prediction-stgnn/
 │   └── config.py
 ├── tools/readme_figures.py  ← README figures (export from results/, render anywhere)
 ├── docs/figures/            ← README figures and the data they are drawn from
-├── tests/                   ← 36 tests: preprocessing, splits, metrics, augmentation, end to end
+├── tests/                   ← 42 tests: preprocessing, splits, metrics, augmentation, features, end to end
 ├── notebooks/
 │   └── stgnn_v3_walkthrough.ipynb  ← every pipeline step, cell by cell
 └── legacy/                  ← v2 notebooks and checkpoint (leaky evaluation)
@@ -340,7 +386,7 @@ seizure-prediction-stgnn/
 
 ## 10. Limitations
 
-- **Model selection used the same test patients.** Eight variants were compared on the
+- **Model selection used the same test patients.** Twelve variants were compared on the
   leave-one-patient-out results, and the best is reported. Each run's threshold and epoch
   are chosen on validation data, but picking the best *variant* this way is mildly
   optimistic; a fresh dataset (e.g. the Siena Scalp EEG Database) is the proper next test.
@@ -354,6 +400,8 @@ seizure-prediction-stgnn/
 - **Single dataset:** pediatric scalp EEG from one hospital; adults and other recording
   setups are untested.
 - **Offline evaluation:** the pipeline is causal, but it has not been run as a live stream.
+- **Few lead seizures:** 65 in leave-one-patient-out and 16 in the patient-specific test
+  periods; differences of a few seizures are within noise.
 - **Small patient-specific test set:** 31 seizures in Sections 7.3–7.4.
 - **Fixed SOP of 30 minutes;** the best horizon may differ between patients.
 

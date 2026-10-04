@@ -35,6 +35,7 @@ from torch_geometric.data import Batch
 
 from .config import CFG
 from .data import SubjectData, list_subjects, load_subject
+from .augment import AugmentConfig, augment_window
 from .model import SoftSeizureLoss, STGNN_Soft, window_to_graph
 from .splits import chronological_split, lopo_folds
 
@@ -45,8 +46,11 @@ class GraphDataset(Dataset):
     """Windows from one or more subjects, turned into PLV graphs on the fly."""
 
     def __init__(self, parts: list[SubjectData], norm: str = "window", features: str = "v3",
-                 full_graph: bool = True):
+                 full_graph: bool = True, augment: bool = False, seed: int = 0):
         self.parts = parts
+        self.augment = augment
+        self.aug_cfg = AugmentConfig()
+        self.seed = seed
         self.norm = norm
         self.features = features
         self.full_graph = full_graph
@@ -67,20 +71,27 @@ class GraphDataset(Dataset):
         x = np.asarray(x, dtype=np.float32)
         if self.norm == "window":           # per-channel z-score: removes amplitude differences
             x = (x - x.mean(axis=1, keepdims=True)) / (x.std(axis=1, keepdims=True) + 1e-6)
+        plv = np.asarray(plv, dtype=np.float32)
+        pb = bp = None
         if self.features == "bands":
-            pb, bp = p.bands(i)
-            return window_to_graph(x, np.asarray(plv, dtype=np.float32), int(p.hard[i]), float(p.risk[i]),
-                                   plv_bands=np.asarray(pb, dtype=np.float32),
-                                   bandpow=np.asarray(bp, dtype=np.float32), full_graph=self.full_graph)
-        return window_to_graph(x, np.asarray(plv, dtype=np.float32), int(p.hard[i]), float(p.risk[i]))
+            pb, bp = (np.asarray(a, dtype=np.float32) for a in p.bands(i))
+        if self.augment:
+            # fresh randomness per draw; seeded per worker by torch, plus the index for variety
+            rng = np.random.default_rng((self.seed, k, int(torch.randint(0, 2**31 - 1, (1,)).item())))
+            x, plv, pb, bp = augment_window(x, plv, rng, self.aug_cfg, pb, bp)
+        if self.features == "bands":
+            return window_to_graph(x, plv, int(p.hard[i]), float(p.risk[i]),
+                                   plv_bands=pb, bandpow=bp, full_graph=self.full_graph)
+        return window_to_graph(x, plv, int(p.hard[i]), float(p.risk[i]))
 
 
 def model_kwargs(features: str) -> dict:
     return {"node_extra": 5, "edge_dim": 6} if features == "bands" else {}
 
 
-def make_dataset(parts, args):
-    return GraphDataset(parts, args.norm, getattr(args, "features", "v3"), getattr(args, "full_graph", True))
+def make_dataset(parts, args, augment: bool = False):
+    return GraphDataset(parts, args.norm, getattr(args, "features", "v3"), getattr(args, "full_graph", True),
+                        augment=augment, seed=getattr(args, "seed", 0))
 
 
 class BalancedEpochSampler(Sampler):
@@ -142,9 +153,10 @@ def predict(model, part: SubjectData, device, args, amp_dtype) -> np.ndarray:
     return np.concatenate(out) if out else np.zeros(0, np.float32)
 
 
-def train_fold(train_parts, val_parts, args, device, amp_dtype):
+def train_fold(train_parts, val_parts, args, device, amp_dtype, init_state=None):
+    """Train one model. ``init_state``: start from these weights (fine-tuning) instead of random."""
     seed_everything(args.seed)
-    ds = make_dataset(train_parts, args)
+    ds = make_dataset(train_parts, args, augment=getattr(args, "augment", False))
     if (ds.hard == 1).sum() == 0:
         raise RuntimeError("training set has no preictal windows")
     loader = DataLoader(ds, batch_size=args.batch_size,
@@ -154,6 +166,8 @@ def train_fold(train_parts, val_parts, args, device, amp_dtype):
     val_small = [validation_subset(p, args.val_max_interictal, args.seed) for p in val_parts]
 
     model = STGNN_Soft(**model_kwargs(getattr(args, "features", "v3"))).to(device)
+    if init_state is not None:
+        model.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in init_state.items()})
     crit = SoftSeizureLoss(args.alpha, args.pos_weight, args.mse_on_logits).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=CFG["weight_decay"])
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
@@ -219,6 +233,7 @@ def save_fold(out_dir, name, model, history, best_auc, val_parts, test_parts, ar
                 "norm": args.norm}, os.path.join(fold_dir, "model.pt"))
     with open(os.path.join(fold_dir, "fold.json"), "w") as f:
         json.dump({"fold": name, "protocol": args.protocol, "features": feats,
+                   "augment": getattr(args, "augment", False),
                    "train": train_subjects,
                    "val": [p.subject for p in val_parts], "test": [p.subject for p in test_parts],
                    "best_val_auc": best_auc, "history": history, "args": vars(args)},
@@ -246,6 +261,9 @@ def main(argv=None):
     ap.add_argument("--norm", choices=["window", "none"], default="window")
     ap.add_argument("--features", choices=["v3", "bands"], default="v3",
                     help="bands: 5-band PLV edge features + relative band power node features")
+    ap.add_argument("--augment", action="store_true",
+                    help="training-time augmentation (src/augment.py): shift, noise, masking, gain, "
+                         "channel dropout, PLV jitter")
     ap.add_argument("--threshold_graph", dest="full_graph", action="store_false",
                     help="with --features bands, keep only edges with broadband PLV > 0.3")
     ap.add_argument("--n_val", type=int, default=3, help="validation subjects per LOPO fold")

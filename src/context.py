@@ -119,10 +119,12 @@ def predict_stack(model, stack: Stack, L, bs=4096):
     return torch.cat(out).numpy() if out else np.zeros(0, np.float32)
 
 
-def train_context(tr: Stack, va: Stack, args, device):
+def train_context(tr: Stack, va: Stack, args, device, init_state=None):
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     model = ContextGRU(tr.E.shape[1], args.hidden, args.dropout).to(device)
+    if init_state is not None:
+        model.load_state_dict(init_state)
     crit = SoftSeizureLoss(alpha=0.5).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
     hard = tr.hard.cpu().numpy()

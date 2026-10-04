@@ -147,7 +147,8 @@ def render(data_path, out_dir):
         a1.set_xlim(0, max(sens) * 1.25)
         a1.set_xlabel("Seizure sensitivity")
         a1.set_yticks(y, [lab for lab, _ in rows])
-        a1.legend(frameon=False, fontsize=8.5, loc="lower right")
+        a1.legend(frameon=False, fontsize=8.5, loc="lower left", bbox_to_anchor=(0, 1.0), ncol=2,
+                  borderaxespad=0.2)
         fa = [s["fpr_per_hour"] for _, s in rows]
         a2.barh(y, fa, height=0.55, color=BLUE)
         for yi, f in zip(y, fa):
@@ -156,7 +157,7 @@ def render(data_path, out_dir):
         a2.set_xlabel("False alarms per hour")
         fig.suptitle(title, x=0.01, ha="left", fontweight="bold")
         fig.text(0.01, 0.005, note, fontsize=8.5, color=TEXT_2)
-        fig.tight_layout(rect=(0, 0.04, 1, 0.97))
+        fig.tight_layout(rect=(0, 0.04, 1, 0.95))
         fig.savefig(os.path.join(out_dir, fname), dpi=130)
         plt.close(fig)
 

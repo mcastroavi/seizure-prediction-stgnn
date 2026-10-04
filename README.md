@@ -72,7 +72,7 @@ Window: 18 channels × 640 samples (5 s at 128 Hz), z-scored per channel
     concat(z_s, z_t) → Linear(128→64) → GELU → Dropout(0.4) → Linear(64→1) → logit
 ```
 
-295k parameters (~1.2 MB).
+~250k parameters (~1 MB).
 
 **Soft labels.** A binary label treats a window 30 minutes before onset the same as one 10
 seconds before. Instead, preictal windows get a target that rises with proximity to onset:
@@ -147,6 +147,7 @@ pip install -r requirements.txt
 
 python -m pytest tests                    # 30 tests, CPU, < 1 min, no dataset needed
 bash run_all.sh /path/to/chb-mit          # everything below, end to end
+jupyter notebook notebooks/stgnn_v3_walkthrough.ipynb   # or step through it cell by cell
 ```
 
 Step by step:
@@ -247,6 +248,8 @@ seizure-prediction-stgnn/
 │   ├── test_eval.py         ← splits, alarms, metrics
 │   ├── test_pipeline.py     ← synthetic EDF → preprocess → baseline → evaluate
 │   └── make_synthetic_chbmit.py
+├── notebooks/
+│   └── stgnn_v3_walkthrough.ipynb  ← every pipeline step, cell by cell
 └── legacy/                  ← v2 notebooks and checkpoint (leaky evaluation)
 ```
 

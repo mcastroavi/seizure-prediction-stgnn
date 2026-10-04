@@ -158,7 +158,8 @@ def main(argv=None):
     risk_timeline(v, pick, row["tau"], os.path.join(out, f"risk_timeline_{pick}.png"), k, n, refractory)
     per_subject(rows, os.path.join(out, "per_subject.png"))
     fold_info = json.load(open(os.path.join(a.results_dir, row["fold"], "fold.json")))
-    model_name = "Logistic regression (baseline)" if fold_info.get("model") == "logistic_regression" else "ST-GNN"
+    model_name = {"logistic_regression": "Logistic regression (baseline)",
+                  "context_gru": "Context GRU (5-min history)"}.get(fold_info.get("model"), "ST-GNN")
     operating_curve(preds, os.path.join(out, "operating_curve.png"), k, n, refractory,
                     sop_min=summ.get("sop_min", 30), min_win=min_win, model_name=model_name)
     print(f"Figures written to {out}")

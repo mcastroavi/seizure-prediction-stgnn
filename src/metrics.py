@@ -55,15 +55,21 @@ def raise_alarms(probs: np.ndarray, run: np.ndarray, tau: float, k: int = 3, n: 
     (360 x 5 s = 30 min, matching the SOP).
     """
     probs, run = np.asarray(probs), np.asarray(run)
+    N = len(probs)
+    alarms = np.zeros(N, dtype=bool)
+    if N == 0:
+        return alarms
     above = (probs >= tau).astype(np.int64)
-    alarms = np.zeros(len(probs), dtype=bool)
+    # trailing sum over the last n windows, restarted at every run boundary
+    csum = np.concatenate([[0], np.cumsum(above)])
+    idx = np.arange(N)
+    starts = np.concatenate([[0], np.where(np.diff(run) != 0)[0] + 1])
+    run_start = starts[np.searchsorted(starts, idx, side="right") - 1]
+    lo = np.maximum(run_start, idx - n + 1)
+    cand = np.where(csum[idx + 1] - csum[lo] >= k)[0]
     last = -10**12
-    run_start = 0
-    for i in range(len(probs)):
-        if i > 0 and run[i] != run[i - 1]:
-            run_start = i
-        lo = max(run_start, i - n + 1)
-        if above[lo:i + 1].sum() >= k and i - last >= refractory:
+    for i in cand:                       # refractory scan over candidates only
+        if i - last >= refractory:
             alarms[i] = True
             last = i
     return alarms
@@ -72,12 +78,20 @@ def raise_alarms(probs: np.ndarray, run: np.ndarray, tau: float, k: int = 3, n: 
 # ── Seizure level ────────────────────────────────────────────────────────────
 
 def event_metrics(alarms: np.ndarray, hard: np.ndarray, block: np.ndarray,
-                  window_sec: float = 5.0) -> dict:
-    """Per-subject event metrics. Windows must be in recording order."""
+                  window_sec: float = 5.0, min_preictal_windows: int = 1) -> dict:
+    """Per-subject event metrics. Windows must be in recording order.
+
+    Seizures with fewer than ``min_preictal_windows`` preictal windows recorded (e.g. a
+    seizure minutes after a recording starts) cannot fairly be predicted; they are left
+    out of the seizure count, and alarms inside them count neither way.
+    """
     alarms, hard, block = np.asarray(alarms), np.asarray(hard), np.asarray(block)
-    seizures = []
+    seizures, skipped = [], 0
     for b in np.unique(block[block >= 0]):
         idx = np.where(block == b)[0]
+        if len(idx) < min_preictal_windows:
+            skipped += 1
+            continue
         hits = idx[alarms[idx]]
         lead = (idx.max() - hits.min() + 1) * window_sec / 60 if len(hits) else None
         seizures.append({
@@ -93,6 +107,7 @@ def event_metrics(alarms: np.ndarray, hard: np.ndarray, block: np.ndarray,
         "n_predicted": sum(s["predicted"] for s in seizures),
         "false_alarms": false_alarms,
         "interictal_hours": interictal_h,
+        "seizures_skipped_short_preictal": skipped,
         "seizures": seizures,
     }
 
@@ -112,6 +127,7 @@ def summarize_events(per_subject: list[dict], sop_min: float = 30.0) -> dict:
 
     return {
         "seizures": n_sz,
+        "seizures_skipped_short_preictal": sum(r.get("seizures_skipped_short_preictal", 0) for r in per_subject),
         "predicted": n_pred,
         "sensitivity": sens,
         "false_alarms": fa,
@@ -127,9 +143,14 @@ def summarize_events(per_subject: list[dict], sop_min: float = 30.0) -> dict:
 
 # ── Threshold selection (validation data only) ───────────────────────────────
 
+# Coarse steps, then fine steps near 1: confident models need thresholds above 0.95
+# (with a 0.95 ceiling, most subjects' validation-optimal threshold sat at the ceiling).
+THRESHOLD_GRID = np.unique(np.round(np.concatenate([
+    np.arange(0.05, 0.951, 0.05), [0.96, 0.97, 0.98, 0.985, 0.99, 0.995, 0.998, 0.999]]), 3))
+
 def select_threshold(val_sets: list[dict], mode: str = "fpr", target_fpr: float = 0.5,
                      k: int = 3, n: int = 5, refractory: int = 360,
-                     window_sec: float = 5.0, grid=None) -> float:
+                     window_sec: float = 5.0, grid=None, min_preictal_windows: int = 1) -> float:
     """Pick ``tau`` on validation subjects only.
 
     ``val_sets`` holds one dict per validation subject with keys
@@ -139,21 +160,21 @@ def select_threshold(val_sets: list[dict], mode: str = "fpr", target_fpr: float 
     mode="fpr" : maximise seizure sensitivity subject to FPR/h <= ``target_fpr``;
                  if no threshold meets the target, return the one with the lowest FPR/h.
     """
-    grid = np.round(np.arange(0.05, 0.96, 0.05), 2) if grid is None else grid
+    grid = THRESHOLD_GRID if grid is None else grid
     if mode == "f1":
         probs = np.concatenate([v["probs"] for v in val_sets])
         hard = np.concatenate([v["hard"] for v in val_sets])
         scores = [f1_score(hard, probs >= t, zero_division=0) for t in grid]
         return float(grid[int(np.argmax(scores))])
 
-    best = None  # (meets_target, sensitivity, -fpr, tau)
+    best = None  # (meets_target, sensitivity, -fpr, tau): ties go to the higher, safer tau
     for t in grid:
         per = [event_metrics(raise_alarms(v["probs"], v["run"], t, k, n, refractory),
-                             v["hard"], v["block"], window_sec) for v in val_sets]
+                             v["hard"], v["block"], window_sec, min_preictal_windows) for v in val_sets]
         s = summarize_events(per)
         sens = 0.0 if np.isnan(s["sensitivity"]) else s["sensitivity"]
         key = (s["fpr_per_hour"] <= target_fpr, sens if s["fpr_per_hour"] <= target_fpr else 0.0,
-               -s["fpr_per_hour"], -t)
+               -s["fpr_per_hour"], t)
         if best is None or key > best[0]:
             best = (key, float(t))
     return best[1]

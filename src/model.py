@@ -1,7 +1,9 @@
 """ST-GNN (GATv2 spatial branch + temporal conv branch) with a single risk output.
 
-Layer names are identical to ``STGNN_Soft`` in chbmit_stgnn_v2.ipynb, so the existing
-checkpoint ``checkpoints/best_chbmit_soft.pt`` loads with ``load_checkpoint``.
+Layer names are identical to ``STGNN_Soft`` in the v2 notebook, so
+``legacy/checkpoints/best_chbmit_soft.pt`` still loads with ``load_checkpoint`` (it expects
+the v2 input format: 23 channels, 256 Hz). The number of channels and samples per window
+are read from the input, so the same class trains on the v3 format (18 channels, 128 Hz).
 """
 
 from __future__ import annotations
@@ -17,15 +19,24 @@ from .config import CFG
 
 
 def window_to_graph(eeg: np.ndarray, plv: np.ndarray, label: int, risk: float | None = None,
-                    threshold: float = CFG["plv_threshold"]) -> Data:
-    """Build a channel graph whose edges are PLV values above ``threshold``.
+                    threshold: float = CFG["plv_threshold"], plv_bands: np.ndarray | None = None,
+                    bandpow: np.ndarray | None = None, full_graph: bool = False) -> Data:
+    """Build a channel graph from one window.
 
-    Falls back to each node's top-3 PLV neighbours when no edge passes the threshold
-    (same behaviour as the notebook).
+    v3 (default): edges where broadband PLV > ``threshold``, edge feature = PLV; falls back
+    to each node's top-3 PLV neighbours when no edge passes (as in the notebook).
+
+    Band features (``plv_bands`` (5, C, C) and ``bandpow`` (C, 5) given): edge features are
+    [broadband PLV, 5 band PLVs] and nodes carry their relative band power as ``xb``.
+    With ``full_graph`` every channel pair is connected and attention decides what matters,
+    rather than a fixed broadband threshold discarding band-specific synchrony.
     """
     x = torch.as_tensor(eeg, dtype=torch.float)
     adj = torch.as_tensor(plv, dtype=torch.float)
-    mask = adj > threshold
+    if full_graph:
+        mask = torch.ones_like(adj, dtype=torch.bool)
+    else:
+        mask = adj > threshold
     mask.fill_diagonal_(False)
     if mask.sum() == 0:
         tmp = adj.clone()
@@ -35,18 +46,27 @@ def window_to_graph(eeg: np.ndarray, plv: np.ndarray, label: int, risk: float | 
         mask.scatter_(1, top, True)
     edge_index = mask.nonzero(as_tuple=False).t().contiguous()
     edge_attr = adj[edge_index[0], edge_index[1]].unsqueeze(1)
+    if plv_bands is not None:
+        pb = torch.as_tensor(plv_bands, dtype=torch.float)            # (5, C, C)
+        edge_attr = torch.cat([edge_attr, pb[:, edge_index[0], edge_index[1]].t()], dim=1)
     g = Data(x=x, edge_index=edge_index, edge_attr=edge_attr,
              y=torch.tensor([label], dtype=torch.long))
+    if bandpow is not None:
+        g.xb = torch.as_tensor(bandpow, dtype=torch.float)            # (C, 5), node-level
     if risk is not None:
         g.risk = torch.tensor([risk], dtype=torch.float)
     return g
 
 
 class STGNN_Soft(nn.Module):
+    """``node_extra``: extra per-node features concatenated before the GAT (5 band powers);
+    ``edge_dim``: features per edge (1 = broadband PLV, 6 = broadband + 5 bands)."""
+
     def __init__(self, node_feat=CFG["node_feat"], gat_out=CFG["gat_out"],
-                 gat_heads=CFG["gat_heads"], dropout=CFG["dropout"]):
+                 gat_heads=CFG["gat_heads"], dropout=CFG["dropout"], node_extra=0, edge_dim=1):
         super().__init__()
         nf, gd, gh = node_feat, gat_out, gat_heads
+        self.node_extra = node_extra
 
         # Per-channel temporal encoder -> node features
         self.node_enc = nn.Sequential(
@@ -55,12 +75,12 @@ class STGNN_Soft(nn.Module):
             nn.Conv1d(32, 64, 3, padding=1), nn.ReLU(),
             nn.AdaptiveAvgPool1d(1),
         )
-        self.node_proj = nn.Linear(64, nf)
+        self.node_proj = nn.Linear(64 + node_extra, nf)
 
         # Spatial branch: GATv2 over the PLV graph
-        self.gat1 = GATv2Conv(nf, gd, heads=gh, edge_dim=1, concat=True)
+        self.gat1 = GATv2Conv(nf, gd, heads=gh, edge_dim=edge_dim, concat=True)
         self.gat_norm1 = nn.LayerNorm(gd * gh)
-        self.gat2 = GATv2Conv(gd * gh, gd, heads=1, edge_dim=1, concat=False)
+        self.gat2 = GATv2Conv(gd * gh, gd, heads=1, edge_dim=edge_dim, concat=False)
         self.gat_norm2 = nn.LayerNorm(gd)
 
         # Temporal branch on the channel-averaged signal
@@ -76,12 +96,16 @@ class STGNN_Soft(nn.Module):
             nn.Linear(gd * 2, 64), nn.GELU(), nn.Dropout(dropout), nn.Linear(64, 1),
         )
 
-    def forward(self, data):
+    def embed(self, data):
+        """64-d window embedding (the fusion layer's hidden state), used by the context model."""
         x, ei, ea, batch = data.x, data.edge_index, data.edge_attr, data.batch
         n_graphs = int(batch.max().item()) + 1
         n_ch = x.size(0) // n_graphs
 
-        xn = self.node_proj(self.node_enc(x.unsqueeze(1)).squeeze(-1))
+        h = self.node_enc(x.unsqueeze(1)).squeeze(-1)
+        if self.node_extra:
+            h = torch.cat([h, data.xb], dim=1)
+        xn = self.node_proj(h)
         xn = F.elu(self.gat_norm1(self.gat1(xn, ei, ea)))
         xn = F.elu(self.gat_norm2(self.gat2(xn, ei, ea)))
         spatial = global_mean_pool(xn, batch)
@@ -89,7 +113,10 @@ class STGNN_Soft(nn.Module):
         xr = x.view(n_graphs, n_ch, -1).mean(dim=1, keepdim=True)
         temporal = self.tcn_proj(self.tcn(xr).squeeze(-1))
 
-        return self.fusion(torch.cat([spatial, temporal], dim=1))  # logits, (B, 1)
+        return self.fusion[:3](torch.cat([spatial, temporal], dim=1))   # Linear, GELU, Dropout
+
+    def forward(self, data):
+        return self.fusion[3](self.embed(data))                           # logits, (B, 1)
 
 
 class SoftSeizureLoss(nn.Module):
@@ -100,7 +127,7 @@ class SoftSeizureLoss(nn.Module):
     to reproduce the original behaviour exactly.
     """
 
-    def __init__(self, alpha=CFG["alpha"], pos_weight=CFG["pos_weight"], mse_on_logits=False):
+    def __init__(self, alpha=CFG["alpha"], pos_weight=1.0, mse_on_logits=False):
         super().__init__()
         self.alpha = alpha
         self.register_buffer("pos_weight", torch.tensor([pos_weight]))

@@ -75,14 +75,24 @@ def test_chronological_split_is_forward_in_time_and_disjoint():
     block = _timeline(6)
     sp = chronological_split(block, gap=12)
     assert sp["train"].max() < sp["val"].min() < sp["val"].max() < sp["test"].min()
-    # each split contains whole seizures
-    for name, n_expected in [("train", 3), ("val", 1), ("test", 2)]:
+    # each split contains whole seizures, at least one each
+    for name in ("train", "val", "test"):
         ids = np.unique(block[sp[name]][block[sp[name]] >= 0])
-        assert len(ids) == n_expected
+        assert len(ids) >= 1
         for b in ids:
             assert np.all(np.isin(np.where(block == b)[0], sp[name]))
     # the gap really separates splits
     assert sp["val"].min() - sp["train"].max() > 12
+
+
+def test_chronological_split_follows_recording_time_not_seizure_count():
+    # 4 seizures early in a long recording, 1 late: a seizure-count split would leave
+    # validation almost no interictal data; a time split gives it a real share.
+    block = np.array([-1] * 50 + ([0] * 10 + [-1] * 5 + [1] * 10 + [-1] * 5 + [2] * 10 + [-1] * 5 + [3] * 10)
+                     + [-1] * 600 + [4] * 10 + [-1] * 200)
+    sp = chronological_split(block, gap=0)
+    n_inter_val = np.sum(block[sp["val"]] == -1)
+    assert n_inter_val > 0.15 * len(block)
 
 
 def test_chronological_split_needs_three_seizures():

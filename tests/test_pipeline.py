@@ -47,6 +47,15 @@ def test_full_pipeline_on_synthetic_edfs():
 
         d1 = load_subject(proc, "chb01")
         assert d1.X.shape[1:] == (18, 640) and d1.n_seizures == 2
+        # band features: 5-band PLV and relative band power, aligned with the windows
+        assert d1.has_bands and d1.plv_bands.shape[1:] == (5, 18, 18) and d1.bandpow.shape[1:] == (18, 5)
+        pb, bp = d1.bands(0)
+        assert np.all(np.asarray(pb) <= 1.001) and np.all(np.asarray(bp) <= 0.001)  # PLV <= 1, log rel power <= 0
+        # the synthetic preictal signal is a 9 Hz oscillation: alpha-band PLV should rise most
+        pre, inter = d1.hard == 1, d1.hard == 0
+        iu = np.triu_indices(18, 1)
+        alpha = np.asarray(d1.plv_bands[d1.sel], float)[:, 2][:, iu[0], iu[1]].mean(1)
+        assert alpha[pre].mean() > alpha[inter].mean() + 0.05
         assert np.all(np.diff(d1.t_start) > 0)    # chronological
 
         out = os.path.join(res, "baseline")
@@ -54,5 +63,10 @@ def test_full_pipeline_on_synthetic_edfs():
         s = evaluate.evaluate(out, "fpr", 2.0, refractory_min=10, sop_min=10, min_preictal_min=3)
         assert s["n_test_subjects"] == 4 and s["seizures"] == 9
         assert s["sensitivity"] >= 0.75 and s["beats_chance_at_0.05"]
+
+        out_b = os.path.join(res, "baseline_bands")
+        baseline.main(["--processed_dir", proc, "--protocol", "chrono", "--features", "bands",
+                       "--out_dir", out_b])
+        assert os.path.exists(os.path.join(out_b, "chb03", "predictions.npz"))
         for f in ("results.json", "results.md", "per_subject.csv", "per_seizure.csv"):
             assert os.path.exists(os.path.join(out, f))

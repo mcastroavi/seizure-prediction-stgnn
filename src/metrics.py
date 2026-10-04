@@ -55,15 +55,21 @@ def raise_alarms(probs: np.ndarray, run: np.ndarray, tau: float, k: int = 3, n: 
     (360 x 5 s = 30 min, matching the SOP).
     """
     probs, run = np.asarray(probs), np.asarray(run)
+    N = len(probs)
+    alarms = np.zeros(N, dtype=bool)
+    if N == 0:
+        return alarms
     above = (probs >= tau).astype(np.int64)
-    alarms = np.zeros(len(probs), dtype=bool)
+    # trailing sum over the last n windows, restarted at every run boundary
+    csum = np.concatenate([[0], np.cumsum(above)])
+    idx = np.arange(N)
+    starts = np.concatenate([[0], np.where(np.diff(run) != 0)[0] + 1])
+    run_start = starts[np.searchsorted(starts, idx, side="right") - 1]
+    lo = np.maximum(run_start, idx - n + 1)
+    cand = np.where(csum[idx + 1] - csum[lo] >= k)[0]
     last = -10**12
-    run_start = 0
-    for i in range(len(probs)):
-        if i > 0 and run[i] != run[i - 1]:
-            run_start = i
-        lo = max(run_start, i - n + 1)
-        if above[lo:i + 1].sum() >= k and i - last >= refractory:
+    for i in cand:                       # refractory scan over candidates only
+        if i - last >= refractory:
             alarms[i] = True
             last = i
     return alarms

@@ -36,6 +36,8 @@ class SubjectData:
     run: np.ndarray          # (N,) id of the contiguous stretch of recording
     t_start: np.ndarray | None = None   # (N,) absolute seconds (v3 only)
     meta: dict = field(default_factory=dict)
+    plv_bands: np.ndarray | None = None  # full (W, 5, C, C) band PLV, if preprocessed with bands
+    bandpow: np.ndarray | None = None    # full (W, C, 5) log relative band power
 
     def __len__(self) -> int:
         return len(self.sel)
@@ -48,12 +50,21 @@ class SubjectData:
         j = self.sel[i]
         return self.X[j], self.plv[j]
 
+    @property
+    def has_bands(self) -> bool:
+        return self.plv_bands is not None and self.bandpow is not None
+
+    def bands(self, i: int):
+        j = self.sel[i]
+        return self.plv_bands[j], self.bandpow[j]
+
     def subset(self, idx) -> "SubjectData":
         """Restrict to positions ``idx`` without copying the big arrays."""
         idx = np.asarray(idx, dtype=np.int64)
         return SubjectData(self.subject, self.X, self.plv, self.sel[idx], self.hard[idx],
                            self.risk[idx], self.block[idx], self.run[idx],
-                           None if self.t_start is None else self.t_start[idx], dict(self.meta))
+                           None if self.t_start is None else self.t_start[idx], dict(self.meta),
+                           self.plv_bands, self.bandpow)
 
 
 # ── Signal helper ────────────────────────────────────────────────────────────
@@ -157,10 +168,14 @@ def _load_v3(d: str, subject: str) -> SubjectData:
     run = runs_from_time(t, w)
     X = np.load(os.path.join(d, "X.npy"), mmap_mode="r")
     plv = np.load(os.path.join(d, "plv.npy"), mmap_mode="r")
+    pb_path, bp_path = os.path.join(d, "plv_bands.npy"), os.path.join(d, "bandpow.npy")
+    has_b = os.path.exists(pb_path) and os.path.exists(bp_path)
     return SubjectData(subject, X, plv, sel, hard, risk, block, run, t,
                        meta={"format": "v3", "params": params,
                              "channels": meta["channels"].tolist(),
-                             "seizures": meta["seizures"].tolist()})
+                             "seizures": meta["seizures"].tolist()},
+                       plv_bands=np.load(pb_path, mmap_mode="r") if has_b else None,
+                       bandpow=np.load(bp_path, mmap_mode="r") if has_b else None)
 
 
 def _load_legacy(d: str, subject: str, cache_plv: bool) -> SubjectData:

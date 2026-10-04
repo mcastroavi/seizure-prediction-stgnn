@@ -44,9 +44,15 @@ from .splits import chronological_split, lopo_folds
 class GraphDataset(Dataset):
     """Windows from one or more subjects, turned into PLV graphs on the fly."""
 
-    def __init__(self, parts: list[SubjectData], norm: str = "window"):
+    def __init__(self, parts: list[SubjectData], norm: str = "window", features: str = "v3",
+                 full_graph: bool = True):
         self.parts = parts
         self.norm = norm
+        self.features = features
+        self.full_graph = full_graph
+        if features == "bands" and not all(p.has_bands for p in parts):
+            raise RuntimeError("--features bands needs data preprocessed with band features "
+                               "(re-run src.preprocess without --no_bands)")
         self.part_id = np.concatenate([np.full(len(p), k) for k, p in enumerate(parts)]).astype(np.int64)
         self.local = np.concatenate([np.arange(len(p)) for p in parts]).astype(np.int64)
         self.hard = np.concatenate([p.hard for p in parts]).astype(np.int64)
@@ -61,7 +67,20 @@ class GraphDataset(Dataset):
         x = np.asarray(x, dtype=np.float32)
         if self.norm == "window":           # per-channel z-score: removes amplitude differences
             x = (x - x.mean(axis=1, keepdims=True)) / (x.std(axis=1, keepdims=True) + 1e-6)
+        if self.features == "bands":
+            pb, bp = p.bands(i)
+            return window_to_graph(x, np.asarray(plv, dtype=np.float32), int(p.hard[i]), float(p.risk[i]),
+                                   plv_bands=np.asarray(pb, dtype=np.float32),
+                                   bandpow=np.asarray(bp, dtype=np.float32), full_graph=self.full_graph)
         return window_to_graph(x, np.asarray(plv, dtype=np.float32), int(p.hard[i]), float(p.risk[i]))
+
+
+def model_kwargs(features: str) -> dict:
+    return {"node_extra": 5, "edge_dim": 6} if features == "bands" else {}
+
+
+def make_dataset(parts, args):
+    return GraphDataset(parts, args.norm, getattr(args, "features", "v3"), getattr(args, "full_graph", True))
 
 
 class BalancedEpochSampler(Sampler):
@@ -112,7 +131,7 @@ def validation_subset(part: SubjectData, max_interictal: int, seed: int) -> Subj
 def predict(model, part: SubjectData, device, args, amp_dtype) -> np.ndarray:
     """Risk scores for one subject's windows, in recording order."""
     model.eval()
-    loader = DataLoader(GraphDataset([part], args.norm), batch_size=args.batch_size * 2,
+    loader = DataLoader(make_dataset([part], args), batch_size=args.batch_size * 2,
                         shuffle=False, collate_fn=collate, num_workers=args.num_workers)
     out = []
     for batch in loader:
@@ -125,7 +144,7 @@ def predict(model, part: SubjectData, device, args, amp_dtype) -> np.ndarray:
 
 def train_fold(train_parts, val_parts, args, device, amp_dtype):
     seed_everything(args.seed)
-    ds = GraphDataset(train_parts, args.norm)
+    ds = make_dataset(train_parts, args)
     if (ds.hard == 1).sum() == 0:
         raise RuntimeError("training set has no preictal windows")
     loader = DataLoader(ds, batch_size=args.batch_size,
@@ -134,7 +153,7 @@ def train_fold(train_parts, val_parts, args, device, amp_dtype):
                         pin_memory=device.type == "cuda", persistent_workers=args.num_workers > 0)
     val_small = [validation_subset(p, args.val_max_interictal, args.seed) for p in val_parts]
 
-    model = STGNN_Soft().to(device)
+    model = STGNN_Soft(**model_kwargs(getattr(args, "features", "v3"))).to(device)
     crit = SoftSeizureLoss(args.alpha, args.pos_weight, args.mse_on_logits).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=CFG["weight_decay"])
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
@@ -179,7 +198,8 @@ def train_fold(train_parts, val_parts, args, device, amp_dtype):
     return model, history, best_auc
 
 
-def save_fold(out_dir, name, model, history, best_auc, val_parts, test_parts, args, device, amp_dtype):
+def save_fold(out_dir, name, model, history, best_auc, val_parts, test_parts, args, device, amp_dtype,
+              train_subjects=None):
     fold_dir = os.path.join(out_dir, name)
     os.makedirs(fold_dir, exist_ok=True)
     arrays = {}
@@ -193,9 +213,13 @@ def save_fold(out_dir, name, model, history, best_auc, val_parts, test_parts, ar
             if p.t_start is not None:
                 arrays[f"{key}__t"] = p.t_start
     np.savez_compressed(os.path.join(fold_dir, "predictions.npz"), **arrays)
-    torch.save({"model_state": model.state_dict(), "val_auc": best_auc}, os.path.join(fold_dir, "model.pt"))
+    feats = getattr(args, "features", "v3")
+    torch.save({"model_state": model.state_dict(), "val_auc": best_auc, "features": feats,
+                "model_kwargs": model_kwargs(feats), "full_graph": getattr(args, "full_graph", True),
+                "norm": args.norm}, os.path.join(fold_dir, "model.pt"))
     with open(os.path.join(fold_dir, "fold.json"), "w") as f:
-        json.dump({"fold": name, "protocol": args.protocol,
+        json.dump({"fold": name, "protocol": args.protocol, "features": feats,
+                   "train": train_subjects,
                    "val": [p.subject for p in val_parts], "test": [p.subject for p in test_parts],
                    "best_val_auc": best_auc, "history": history, "args": vars(args)},
                   f, indent=2, default=str)
@@ -220,6 +244,10 @@ def main(argv=None):
     ap.add_argument("--mse_on_logits", action="store_true",
                     help="reproduce the v2 loss exactly (MSE on raw logits)")
     ap.add_argument("--norm", choices=["window", "none"], default="window")
+    ap.add_argument("--features", choices=["v3", "bands"], default="v3",
+                    help="bands: 5-band PLV edge features + relative band power node features")
+    ap.add_argument("--threshold_graph", dest="full_graph", action="store_false",
+                    help="with --features bands, keep only edges with broadband PLV > 0.3")
     ap.add_argument("--n_val", type=int, default=3, help="validation subjects per LOPO fold")
     ap.add_argument("--val_max_interictal", type=int, default=20000)
     ap.add_argument("--num_workers", type=int, default=4)
@@ -250,7 +278,7 @@ def main(argv=None):
             print(f"\n== fold {f.name}: train {len(f.train)} subj | val {f.val} | test {f.test}")
             tr, va, te = ([data[s] for s in grp] for grp in (f.train, f.val, f.test))
             model, hist, auc = train_fold(tr, va, args, device, amp_dtype)
-            save_fold(args.out_dir, f.name, model, hist, auc, va, te, args, device, amp_dtype)
+            save_fold(args.out_dir, f.name, model, hist, auc, va, te, args, device, amp_dtype, f.train)
     else:
         for s in args.folds or subjects:
             d = data[s]
@@ -261,7 +289,7 @@ def main(argv=None):
             print(f"\n== {s}: train {len(sp['train'])} | val {len(sp['val'])} | test {len(sp['test'])} windows")
             tr, va, te = [d.subset(sp["train"])], [d.subset(sp["val"])], [d.subset(sp["test"])]
             model, hist, auc = train_fold(tr, va, args, device, amp_dtype)
-            save_fold(args.out_dir, s, model, hist, auc, va, te, args, device, amp_dtype)
+            save_fold(args.out_dir, s, model, hist, auc, va, te, args, device, amp_dtype, [s])
 
     print(f"\nDone. Now run:  python -m src.evaluate --results_dir {args.out_dir}")
 

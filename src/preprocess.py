@@ -42,10 +42,30 @@ def plv_batch(windows: np.ndarray, chunk: int = 256) -> np.ndarray:
     return out
 
 
+# Frequency bands for band-specific PLV and relative band power. Gamma is capped at 40 Hz
+# by the broadband filter.
+BANDS = {"delta": (0.5, 4.0), "theta": (4.0, 8.0), "alpha": (8.0, 13.0),
+         "beta": (13.0, 30.0), "gamma": (30.0, 40.0)}
+
+
+def band_power(windows: np.ndarray, fs: float, band=(0.5, 40.0)) -> np.ndarray:
+    """log10 relative power per channel and band: (W, C, T) -> (W, C, n_bands).
+
+    Relative power (band / total) does not depend on signal amplitude, so it survives the
+    per-window z-scoring and is comparable across patients.
+    """
+    T = windows.shape[-1]
+    psd = np.abs(np.fft.rfft(windows * np.hanning(T), axis=-1)) ** 2
+    f = np.fft.rfftfreq(T, 1 / fs)
+    total = psd[..., (f >= band[0]) & (f < band[1])].sum(-1) + 1e-12
+    rel = [psd[..., (f >= lo) & (f < hi)].sum(-1) / total for lo, hi in BANDS.values()]
+    return np.log10(np.stack(rel, axis=-1) + 1e-8).astype(np.float32)
+
+
 def preprocess_subject(subject: str, raw_dir: str, out_dir: str, fs_out: int = 128,
                        window_sec: float = 5.0, band=(0.5, 40.0), preictal_min: float = 30,
                        postictal_min: float = 5, buffer_min: float = 60, sph_min: float = 0,
-                       channels=STANDARD_CHANNELS) -> dict:
+                       channels=STANDARD_CHANNELS, bands: bool = True) -> dict:
     t_begin = time.time()
     sdir = os.path.join(raw_dir, subject)
     summary_path = os.path.join(sdir, f"{subject}-summary.txt")
@@ -90,6 +110,11 @@ def preprocess_subject(subject: str, raw_dir: str, out_dir: str, fs_out: int = 1
     os.makedirs(sub_out, exist_ok=True)
     X = np.lib.format.open_memmap(os.path.join(sub_out, "X.npy"), "w+", np.float16, (N, C, T))
     P = np.lib.format.open_memmap(os.path.join(sub_out, "plv.npy"), "w+", np.float16, (N, C, C))
+    if bands:
+        PB = np.lib.format.open_memmap(os.path.join(sub_out, "plv_bands.npy"), "w+", np.float16,
+                                       (N, len(BANDS), C, C))
+        BP = np.lib.format.open_memmap(os.path.join(sub_out, "bandpow.npy"), "w+", np.float16,
+                                       (N, C, len(BANDS)))
     t_start = np.empty(N)
     file_idx = np.empty(N, dtype=np.int16)
 
@@ -101,19 +126,29 @@ def preprocess_subject(subject: str, raw_dir: str, out_dir: str, fs_out: int = 1
         frac = Fraction(fs_out / f["fs_in"]).limit_denominator(1000)
         if frac != 1:
             sig = resample_poly(sig, frac.numerator, frac.denominator, axis=1)
-        sig = sig[:, : n * T].reshape(C, n, T).transpose(1, 0, 2).astype(np.float32)
+        cont = sig[:, : n * T]
+        sig = cont.reshape(C, n, T).transpose(1, 0, 2).astype(np.float32)
         X[pos:pos + n] = sig
         P[pos:pos + n] = plv_batch(sig)
+        if bands:
+            BP[pos:pos + n] = band_power(sig, fs_out, band)
+            for b, (lo, hi) in enumerate(BANDS.values()):
+                # filter the continuous recording, then window: no per-window edge effects
+                sb = sosfiltfilt(butter(4, [lo, hi], btype="band", fs=fs_out, output="sos"), cont, axis=1)
+                PB[pos:pos + n, b] = plv_batch(sb.reshape(C, n, T).transpose(1, 0, 2))
         t_start[pos:pos + n] = f["t_abs"] + np.arange(n) * window_sec
         file_idx[pos:pos + n] = k
         pos += n
     X.flush(); P.flush()
+    if bands:
+        PB.flush(); BP.flush()
 
     labels, sz_id = label_windows(t_start, window_sec, seizures, preictal_min * 60,
                                   postictal_min * 60, buffer_min * 60, sph_min * 60)
     params = {"fs": fs_out, "window_sec": window_sec, "band": list(band),
               "preictal_min": preictal_min, "postictal_min": postictal_min,
-              "buffer_min": buffer_min, "sph_min": sph_min}
+              "buffer_min": buffer_min, "sph_min": sph_min,
+              "bands": BANDS if bands else None}
     np.savez(os.path.join(sub_out, "meta.npz"), label=labels, seizure_id=sz_id, t_start=t_start,
              file_idx=file_idx, files=np.array([f["name"] for f in files]),
              channels=np.array(channels), seizures=np.array(seizures, dtype=float).reshape(-1, 2),
@@ -165,6 +200,7 @@ def main(argv=None):
     ap.add_argument("--buffer_min", type=float, default=60,
                     help="interictal windows must be at least this far from any seizure")
     ap.add_argument("--sph_min", type=float, default=0, help="seizure prediction horizon")
+    ap.add_argument("--no_bands", action="store_true", help="skip band PLV / band power features")
     ap.add_argument("--workers", type=int, default=1)
     a = ap.parse_args(argv)
 
@@ -172,7 +208,7 @@ def main(argv=None):
                                     if d.startswith("chb") and os.path.isdir(os.path.join(a.raw_dir, d)))
     kw = dict(raw_dir=a.raw_dir, out_dir=a.out_dir, fs_out=a.fs_out, window_sec=a.window_sec,
               preictal_min=a.preictal_min, postictal_min=a.postictal_min,
-              buffer_min=a.buffer_min, sph_min=a.sph_min)
+              buffer_min=a.buffer_min, sph_min=a.sph_min, bands=not a.no_bands)
     print(f"Preprocessing {len(subjects)} subjects -> {a.out_dir}")
     jobs = [(s, kw) for s in subjects]
     if a.workers > 1:

@@ -26,17 +26,29 @@ from .data import SubjectData, list_subjects, load_subject
 from .splits import chronological_split, lopo_folds
 
 
-def features(part: SubjectData, chunk: int = 4096) -> np.ndarray:
+FEATURES = "v3"   # set from --features
+
+
+def features(part: SubjectData, chunk: int = 4096, kind: str | None = None) -> np.ndarray:
+    """v3: broadband PLV (153) + per-channel log variance (18).
+    bands: additionally 5 band PLVs (5 x 153) and log relative band power (18 x 5)."""
+    kind = kind or FEATURES
     n_ch = part.plv.shape[1]
     iu = np.triu_indices(n_ch, 1)
     out = []
     for s in range(0, len(part), chunk):
         sel = part.sel[s:s + chunk]
         order = np.argsort(sel)                      # sorted reads are much faster on memmaps
-        plv = np.asarray(part.plv[sel[order]], dtype=np.float32)[np.argsort(order)]
-        x = np.asarray(part.X[sel[order]], dtype=np.float32)[np.argsort(order)]
-        out.append(np.hstack([plv[:, iu[0], iu[1]], np.log(x.var(axis=2) + 1e-6)]))
-    return np.vstack(out) if out else np.zeros((0, len(iu[0]) + n_ch), np.float32)
+        inv = np.argsort(order)
+        plv = np.asarray(part.plv[sel[order]], dtype=np.float32)[inv]
+        x = np.asarray(part.X[sel[order]], dtype=np.float32)[inv]
+        cols = [plv[:, iu[0], iu[1]], np.log(x.var(axis=2) + 1e-6)]
+        if kind == "bands":
+            pb = np.asarray(part.plv_bands[sel[order]], dtype=np.float32)[inv]
+            bp = np.asarray(part.bandpow[sel[order]], dtype=np.float32)[inv]
+            cols += [pb[:, :, iu[0], iu[1]].reshape(len(sel), -1), bp.reshape(len(sel), -1)]
+        out.append(np.hstack(cols))
+    return np.vstack(out)
 
 
 def sample_train(parts, max_interictal_per_subject, seed):
@@ -75,6 +87,7 @@ def run_fold(name, train_parts, val_parts, test_parts, args, protocol):
     np.savez_compressed(os.path.join(d, "predictions.npz"), **arrays)
     with open(os.path.join(d, "fold.json"), "w") as f:
         json.dump({"fold": name, "protocol": protocol, "model": "logistic_regression",
+                   "features": FEATURES,
                    "val": [p.subject for p in val_parts], "test": [p.subject for p in test_parts],
                    "val_auc_mean": float(np.mean(val_auc)) if val_auc else None,
                    "args": vars(args)}, f, indent=2)
@@ -91,7 +104,10 @@ def main(argv=None):
     ap.add_argument("--max_interictal", type=int, default=20000, help="per training subject")
     ap.add_argument("--C", type=float, default=0.1, help="inverse L2 regularisation strength")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--features", choices=["v3", "bands"], default="v3")
     args = ap.parse_args(argv)
+    global FEATURES
+    FEATURES = args.features
     args.out_dir = args.out_dir or os.path.join("results", f"baseline_{args.protocol}")
 
     subjects = list_subjects(args.processed_dir)

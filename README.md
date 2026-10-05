@@ -11,6 +11,24 @@
 
 ---
 
+> ### ⚠ Correction (5 Oct 2026): the context-model results were inflated
+> The 5-minute context model (`src/context.py`) built each window's history from **labelled
+> windows only**. Unlabelled windows (seizures, postictal periods, the 30–60-min buffers) were
+> dropped, so the history breaks right before every preictal period, and *how much history a
+> window has* gives its label away. A control model that sees **no EEG at all**, only that gap
+> pattern, predicts **120 of 151 seizures** (58 of 65 lead seizures) at 0.21 false alarms/h.
+>
+> Reading the history from **every recorded window**, as a live system would, removes the leak
+> (the same control predicts 4/151). With that fix the best context model, ST-GNN + bands with
+> 5 minutes of history, predicts **61 ± 1 / 151 seizures at 0.48 false alarms/h** (3 seeds,
+> p ≈ 10⁻⁷) and **14 ± 2 / 65 lead seizures** (chance 15%; significant in 2 of 3 seeds).
+> Longer histories (15–60 min) do not improve it.
+>
+> Rows marked † below come from the leaky context model and overstate performance; the window-level
+> models (no context) and the evaluation code are not affected. The corrected model and the full
+> analysis (no-EEG controls, 5–60-minute histories, CNN encoders) are in
+> [seizure-prediction-cnn](https://github.com/mcastroavi/seizure-prediction-cnn) (`src/long_context.py`, `Long_context_walkthrough.ipynb`).
+
 ## 0. Summary
 
 **Goal:** warn patients minutes before a seizure, from scalp EEG.
@@ -21,24 +39,21 @@ channels and whose edges are Phase Locking Values (PLV) in several frequency ban
 attention network embeds each window; a recurrent model reads the last 5 minutes of
 embeddings and outputs a **continuous risk score** that rises toward onset.
 
-**Result (24 patients, each tested by a model that never saw them):**
+**Result (24 patients, each tested by a model that never saw them; corrected, see above):**
 
-| Best model | All seizures | Lead seizures only |
+| Best model (ST-GNN + bands, 5-min context, history from every window; 3 seeds) | All seizures | Lead seizures only |
 |---|---|---|
-| Seizures predicted | **66 / 151 (44%)** | **21 / 65 (32%)** |
-| False alarms per hour | 0.37 | 0.33 (about one every 3 hours) |
-| Mean warning time | 19.4 min | 20.7 min |
-| Random predictor at the same false-alarm rate | 17% | 15% |
-| p vs. chance | 9 × 10⁻¹⁵ | 4 × 10⁻⁴ |
+| Seizures predicted | **61 ± 1 / 151 (41%)** | 14 ± 2 / 65 (22%) |
+| False alarms per hour | 0.48 | 0.32 |
+| Mean warning time | 17.6 min | |
+| Random predictor at the same false-alarm rate | 21% | 15% |
+| p vs. chance | ≈ 10⁻⁷ | 0.02–0.33 (2 of 3 seeds < 0.05) |
 
 **Lead seizures** (starting ≥ 4 h after the previous one) are the stricter test. Many
 CHB-MIT seizures come in clusters, and a model can catch those by learning "another
-seizure is likely soon" rather than by recognising pre-seizure EEG. On lead seizures,
-only the models that combine ST-GNN embeddings with minutes of context stay clearly
-better than chance. Adding the time since the last seizure raises all-seizure
-sensitivity to 54% (a useful seizure-cluster warning) but does not help on lead
-seizures (Section 7.1). Personalization results are promising but too small to be
-conclusive (Section 7.3).
+seizure is likely soon" rather than by recognising pre-seizure EEG. After the correction,
+no model is robustly better than chance on lead seizures: the gain from context is mostly
+on clustered seizures.
 
 **How this version came about.** v2 reported a window-level AUC of 0.883 using a random
 split that leaked information between training and test data. v3 rebuilds everything, from
@@ -220,13 +235,20 @@ seizures** and on **lead seizures only** (Section 4).
 | ST-GNN (5-s windows) | 64 (42%) | 0.66 | 1 × 10⁻⁴ | 17 (26%) | 0.56 | 24% | 0.41 |
 | ST-GNN + band features | 52 (34%) | 0.53 | 0.001 | 16 (25%) | 0.40 | 18% | 0.12 |
 | ST-GNN + bands + augmentation | 49 (32%) | 0.62 | 0.06 | 22 (34%) | 0.46 | 21% | 0.008 |
-| Context GRU on hand-crafted features | 48 (32%) | 0.54 | 0.014 | 18 (28%) | 0.41 | 19% | 0.046 |
-| Context GRU on ST-GNN | 68 (45%) | 0.52 | 2 × 10⁻⁹ | **26 (40%)** | 0.48 | 21% | 4 × 10⁻⁴ |
-| **Context GRU on ST-GNN + bands** | **66 (44%)** | **0.37** | **9 × 10⁻¹⁵** | **21 (32%)** | **0.33** | **15%** | **4 × 10⁻⁴** |
-| … + augmentation | 64 (42%) | 0.49 | 1 × 10⁻⁸ | 16 (25%) | 0.40 | 18% | 0.13 |
-| … + time of day | 49 (32%) | 0.40 | 2 × 10⁻⁵ | 14 (22%) | 0.36 | 17% | 0.18 |
-| … + seizure history | **88 (58%)** | 0.44 | 5 × 10⁻²⁵ | 16 (25%) | 0.37 | 17% | 0.07 |
-| … + time of day & seizure history | 81 (54%) | **0.34** | 5 × 10⁻²⁷ | 21 (32%) | 0.32 | 15% | 2 × 10⁻⁴ |
+| Context GRU on hand-crafted features † | 48 (32%) | 0.54 | 0.014 | 18 (28%) | 0.41 | 19% | 0.046 |
+| Context GRU on ST-GNN † | 68 (45%) | 0.52 | 2 × 10⁻⁹ | **26 (40%)** | 0.48 | 21% | 4 × 10⁻⁴ |
+| Context GRU on ST-GNN + bands † | 66 (44%) | 0.37 | 9 × 10⁻¹⁵ | 21 (32%) | 0.33 | 15% | 4 × 10⁻⁴ |
+| … + augmentation † | 64 (42%) | 0.49 | 1 × 10⁻⁸ | 16 (25%) | 0.40 | 18% | 0.13 |
+| … + time of day † | 49 (32%) | 0.40 | 2 × 10⁻⁵ | 14 (22%) | 0.36 | 17% | 0.18 |
+| … + seizure history † | **88 (58%)** | 0.44 | 5 × 10⁻²⁵ | 16 (25%) | 0.37 | 17% | 0.07 |
+| … + time of day & seizure history † | 81 (54%) | **0.34** | 5 × 10⁻²⁷ | 21 (32%) | 0.32 | 15% | 2 × 10⁻⁴ |
+
+| *Corrected:* context GRU on ST-GNN + bands, history from every window, 5 min (3 seeds) | 61 ± 1 (41%) | 0.48 | 4 × 10⁻⁸ | 14 ± 2 (22%) | 0.32 | 15% | 0.04 (median) |
+| *Corrected:* same, 60-min history (3 seeds) | 60 ± 3 (40%) | 0.43 | 5 × 10⁻⁹ | 14 ± 1 (22%) | 0.40 | 18% | 0.24 (median) |
+| *Control:* no EEG, labelled-window history only (the leak) | 120 (79%) | 0.21 | 9 × 10⁻⁹⁰ | 58 (89%) | 0.21 | 10% | 2 × 10⁻⁵⁰ |
+
+† History built from labelled windows only (leaky, see the correction at the top). The figures
+below include these rows.
 
 ![Ablation, all seizures](docs/figures/ablation_lopo.png)
 
@@ -237,22 +259,13 @@ seizures** and on **lead seizures only** (Section 4).
 - **Lead seizures are much harder.** Only 65 of 177 test seizures are lead seizures; the
   rest follow another seizure within 4 hours, mostly in a few patients (chb12, chb24).
   On lead seizures, logistic regression and the window-level ST-GNN no longer beat chance.
-- **ST-GNN embeddings plus minutes of context is the result that survives.** Both context
-  models on ST-GNN embeddings stay clearly better than chance on lead seizures
-  (p < 0.001); the same context model on hand-crafted features is borderline (p = 0.046).
-  The 5-minute context also improved both ST-GNN variants on all seizures, mainly by
-  suppressing isolated false alarms.
-- **Band features shift the operating point rather than adding signal.** With context they
-  give the lowest false-alarm rates (0.33–0.37/h) but catch fewer lead seizures (21 vs 26);
-  the margin over chance is similar.
-- **Seizure history predicts clusters, not seizures.** Adding the time since the last
-  seizure lifts all-seizure sensitivity from 44% to 58%, yet gives nothing on lead seizures.
-  The model learns that seizures come in clusters. That is clinically useful as a cluster
-  warning, but it is not pre-seizure EEG prediction. (The feature is floored at the 60-min
-  labelling buffer so it cannot exploit the labelling rule itself; see `src/context_features.py`.)
-- **Time of day does not transfer between patients.** Each patient's daily seizure pattern
-  differs, so one learned from others adds noise. Combined with seizure history it gives the
-  best all-seizure model (54% at 0.34 false alarms/h), equal to the best on lead seizures.
+- **The context-model rows (†) are inflated by a history leak** (correction at the top). With
+  honest history, context still lifts the ST-GNN on all seizures (52 → 61/151 at a lower false-alarm
+  rate) but no context model is robustly better than chance on lead seizures, and 15–60 minutes of
+  history does no better than 5. The comparisons between † variants below (band features, seizure
+  history, time of day) were made with the leaky model and should be re-checked with the corrected one.
+- **Band features shift the operating point rather than adding signal.** At window level they
+  lower the false-alarm rate (0.66 → 0.53/h) and the number of seizures caught (64 → 52).
 - **Augmentation did not help** (time shift, noise, masking, channel gain, channel dropout,
   PLV jitter). The window-level model with augmentation does reach p = 0.008 on lead
   seizures, but its context version drops to chance; with 65 seizures, differences of a few
@@ -264,10 +277,13 @@ seizures** and on **lead seizures only** (Section 4).
 
 ![Sensitivity vs false alarms, all seizures](docs/figures/operating_curve.png)
 
+(The curve labelled as the context model uses the leaky † history.)
+
 ### 7.2 Per patient: large differences
 
-Counted over all seizures. The best model works well for some patients and not at all for
-others.
+Counted over all seizures, for the context GRU on ST-GNN + bands † (leaky history; the
+per-patient pattern is shown for illustration, the absolute numbers are overstated). The model
+works well for some patients and not at all for others.
 
 ![Per patient](docs/figures/per_subject.png)
 
@@ -286,7 +302,8 @@ patients taught the model.
 
 The 13 patients with ≥ 3 seizures. Each starts from the leave-one-patient-out model that
 never saw them, adapts on the first ~50% of their recording, and is tested on the last ~30%
-(115 interictal hours).
+(115 interictal hours). † Every variant here uses the 5-minute context model with
+labelled-only history (see the correction at the top), so these numbers are not reliable.
 
 | Variant | All (31): predicted | FA/h | p | Lead (16): predicted | FA/h | p |
 |---|---|---|---|---|---|---|
@@ -317,12 +334,13 @@ Same 13 patients and test data as 7.3, models trained only on each patient's own
 | Logistic regression + bands | 8 | 0.17 | 0.003 | 2 | 0.34 |
 | ST-GNN | 6 | 0.16 | 0.03 | 0 | 1.0 |
 | ST-GNN + bands | 6 | 0.27 | 0.19 | 0 | 1.0 |
-| Context GRU, hand-crafted features | 9 | 0.21 | 0.002 | 4 | 0.05 |
-| Context GRU on ST-GNN | 7 | 0.17 | 0.01 | 1 | 0.57 |
-| Context GRU on ST-GNN + bands | 7 | 0.14 | 0.004 | 1 | 0.50 |
-| … + seizure history | 11 | 0.20 | 8 × 10⁻⁵ | 5 | 0.001 |
-| … + time of day & seizure history | 9 | 0.22 | 0.003 | 4 | 0.02 |
+| Context GRU, hand-crafted features † | 9 | 0.21 | 0.002 | 4 | 0.05 |
+| Context GRU on ST-GNN † | 7 | 0.17 | 0.01 | 1 | 0.57 |
+| Context GRU on ST-GNN + bands † | 7 | 0.14 | 0.004 | 1 | 0.50 |
+| … + seizure history † | 11 | 0.20 | 8 × 10⁻⁵ | 5 | 0.001 |
+| … + time of day & seizure history † | 9 | 0.22 | 0.003 | 4 | 0.02 |
 
+† Context model with labelled-only history (leaky; see the correction at the top).
 With only the first half of one patient's recording (often 2–3 seizures) for training,
 all models are data-limited. One suggestive exception: a patient's *own* seizure history
 helps even on lead seizures (5 of 16, p = 0.001), unlike the population-level history in
@@ -390,10 +408,10 @@ seizure-prediction-stgnn/
   leave-one-patient-out results, and the best is reported. Each run's threshold and epoch
   are chosen on validation data, but picking the best *variant* this way is mildly
   optimistic; a fresh dataset (e.g. the Siena Scalp EEG Database) is the proper next test.
-- **Recording-start artifact.** The context model starts each recording file with an empty
-  history, which raises the risk to ~0.65–0.7 for the first minute of every file (visible in
-  the chb15 timeline). It stays below most thresholds but should be fixed, e.g. by training
-  with short histories or suppressing the first minutes of a file.
+- **Context-model history leak (found 5 Oct 2026).** The risk jump at the start of every
+  recording file was a symptom of it: the model had learned that a short history means a seizure is
+  coming. `src/context.py` here still builds the leaky history and is kept so the † results can be
+  reproduced; the corrected model is `src/long_context.py` in [seizure-prediction-cnn](https://github.com/mcastroavi/seizure-prediction-cnn).
 - **Strong differences between patients.** For 6 of 24 patients (e.g. chb10, chb15,
   chb23) the general model raises no correct alarm; personalization helps some of them
   (chb10: 0/5 → 2/5 test seizures), not all (chb13: 0/5 in every variant).
